@@ -31,7 +31,7 @@ def get_product_text_for_embedding(product_data: dict) -> str:
     combined_text = (
         f"Товар: {name}\n"
         f"Теги для поиска: {tags}\n"
-        f"Описание: {desc[:500]}"
+        f"Описание: {desc}"
     )
     # КРИТИЧЕСКОЕ ИЗМЕНЕНИЕ: Нормализация к нижнему регистру
     return combined_text.lower()
@@ -121,7 +121,23 @@ def backfill_product_embeddings(batch_size: int = 500, pause_between: float = 0.
     
     # ... (Цикл по items_to_tag остается прежним: tags = generate_search_tags(description) теперь возвращает lower())
     for p in items_to_tag:
-        # ... (код обновления)
+        pid = p.get("id")
+        desc = p.get("description", "")
+        
+        # 1. Генерация тегов
+        tags = generate_search_tags(desc) 
+        
+        if not tags:
+            logger.warning("Пропускаем продукт %s — не удалось сгенерировать теги.", pid)
+            time.sleep(pause_between)
+            continue
+            
+        # 2. Обновление в Supabase
+        try:
+            upd = supabase.table("products").update({"search_tags": tags}).eq("id", pid).execute()
+            logger.info("Успешно обновлен search_tags для ID=%s: %s", pid, tags)
+        except Exception as e:
+            logger.error("Ошибка обновления тега для ID=%s: %s", pid, e)# ... (код обновления)
         time.sleep(pause_between)
     
     # ====================================================

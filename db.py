@@ -128,7 +128,7 @@ def embed_text(text: str):
 
 
 # 🚀 Фаза 1 — Ускоренный векторный поиск (ОСТАВЛЯЕМ ТОЛЬКО ЕГО)
-def search_products_phase1(query: str, top_k: int = 15, min_sim: float = 0.45):
+def search_products_phase1(query: str, top_k: int = 15, min_sim: float = 0.30):
     
     # 💡 КРИТИЧЕСКОЕ ИЗМЕНЕНИЕ: Нормализация запроса
     normalized_query = query.lower() 
