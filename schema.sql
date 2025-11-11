@@ -45,6 +45,21 @@ create table public.messages (
   created_at timestamptz default now()
 );
 
+-- 5. Таблица для фрагментов каталога (chunks)
+-- Здесь хранятся небольшие фрагменты текста из каталога для точного RAG-поиска.
+create table public.catalog_chunks (
+  id bigserial primary key,
+  product_id bigint references public.products(id) on delete cascade, -- Связь с конкретным товаром
+  content text not null, -- Текст фрагмента
+  embedding vector(1536), -- Вектор фрагмента
+  created_at timestamptz default now()
+);
+
+-- Индекс для ускорения векторного поиска по фрагментам
+create index on public.catalog_chunks using ivfflat (embedding vector_cosine_ops)
+with
+  (lists = 100);
+
 -- 4. Функция для векторного поиска (match_products)
 -- Эта функция позволяет выполнять семантический поиск по эмбеддингам.
 create or replace function match_products (
@@ -74,4 +89,64 @@ as $$
   where p.embedding is not null
   order by p.embedding <=> query_embedding
   limit match_count;
+$$;
+
+-- 6. НОВАЯ функция для поиска по фрагментам (match_chunks)
+-- Ищет наиболее релевантные фрагменты текста по всему каталогу.
+create or replace function match_chunks (
+  query_embedding vector(1536),
+  match_count int
+)
+returns table (
+  id bigint,
+  product_id bigint,
+  content text,
+  similarity float
+)
+language sql stable
+as $$
+  select
+    cc.id,
+    cc.product_id,
+    cc.content,
+    1 - (cc.embedding <=> query_embedding) as similarity
+  from public.catalog_chunks as cc  
+  order by cc.embedding <=> query_embedding
+  limit match_count;
+$$;
+
+-- 7. НОВАЯ функция для получения товаров по списку ID
+-- Нужна для финального шага RAG-поиска.
+create or replace function get_products_by_ids(p_ids bigint[])
+returns table (
+  id bigint,
+  name text,
+  description text,
+  price numeric,
+  images text,
+  pv int,
+  search_tags text
+)
+language sql stable
+as $$
+  select
+    p.id, p.name, p.description, p.price, p.images, p.pv, p.search_tags
+  from public.products as p
+  where p.id = any(p_ids);
+$$;
+-- 8. ИСПРАВЛЕННАЯ функция для поиска по ключевым словам
+-- Ищет прямое вхождение слов в названии и тегах. Переписана на 'sql' для стабильности.
+-- 💡 ИЗМЕНЕНО: Принимает массив слов и ищет товары, содержащие ВСЕ эти слова.
+create or replace function keyword_search_products(
+  search_terms text[]
+)
+returns setof public.products
+language sql stable
+as $$
+  SELECT *
+  FROM public.products
+  WHERE (
+    SELECT bool_and(name ILIKE '%' || term || '%' OR search_tags ILIKE '%' || term || '%')
+    FROM unnest(search_terms) as term
+  );
 $$;

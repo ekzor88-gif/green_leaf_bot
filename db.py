@@ -4,6 +4,7 @@ import config
 import json 
 import logging
 import asyncio 
+import pymorphy3 # 💡 НОВАЯ БИБЛИОТЕКА
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -11,6 +12,7 @@ logger.setLevel(logging.DEBUG)
 # 💡 Инициализация синхронных клиентов
 supabase = create_client(config.SUPABASE_URL, config.SUPABASE_KEY)
 openai_client = OpenAI(api_key=config.OPENAI_API_KEY)
+morph = pymorphy3.MorphAnalyzer() # 💡 Инициализация анализатора
 
 
 # ==============================================================================
@@ -131,49 +133,89 @@ def embed_text(text: str):
         return None
 
 
-# 🚀 Фаза 1 — Ускоренный векторный поиск (ОСТАВЛЯЕМ ТОЛЬКО ЕГО)
-def search_products_phase1(query: str, top_k: int = 15, min_sim: float = 0.30):
-    
-    # 💡 КРИТИЧЕСКОЕ ИЗМЕНЕНИЕ: Нормализация запроса
-    normalized_query = query.lower() 
-    
-    # Передаем нормализованный запрос в вашу функцию embed_text
+def search_product_chunks(query: str, top_k: int = 10):
+    """
+    Ищет релевантные ФРАГМЕНТЫ (chunks) в базе данных.
+    Возвращает список словарей, каждый из которых содержит `product_id` и `content`.
+    """
+    normalized_query = query.lower()
     query_vector = embed_text(normalized_query)
     if not query_vector:
         return []
 
-    # 💡 ВАЖНО: Добавлено поле search_tags для использования в RAG-ответе
     response = supabase.rpc(
-        "match_products",
-        {"query_embedding": query_vector, "match_count": top_k}
+        "match_chunks",
+        {
+            "query_embedding": query_vector, 
+            "match_count": top_k
+        }
     ).execute()
 
-    results = [
-        {
-            "id": item["id"],
-            "name": item["name"],
-            "description": item.get("description", ""),
-            "price": item.get("price"),
-            "image": item.get("images"),
-            "search_tags": item.get("search_tags", ""), # 💡 НОВОЕ: Извлекаем теги
-            "similarity": item["similarity"],
-        }
-        for item in response.data
-        if item["similarity"] >= min_sim
-    ]
+    if not response.data:
+        return []
 
-    # Рекурсивный откат
-    if not results and min_sim > 0.15:
-        logger.debug(f"[SEARCH] Снижаем порог до {min_sim - 0.05}")
-        return search_products_phase1(query, top_k, min_sim - 0.05)
+    return response.data
 
-    return results
+def get_products_by_ids(product_ids: list) -> list:
+    """Получает полную информацию о товарах по списку их ID."""
+    if not product_ids:
+        return []
+    
+    response = supabase.rpc(
+        "get_products_by_ids", # Предполагается, что такая RPC функция создана
+        {"p_ids": product_ids}
+    ).execute()
+    
+    return response.data or []
 
+# 🚀 ПОЛНОСТЬЮ ПЕРЕРАБОТАННАЯ ФУНКЦИЯ
+def _lemmatize_and_clean_query(query: str) -> list[str]:
+    """
+    Приводит слова в запросе к начальной форме (лемматизирует) и удаляет стоп-слова.
+    "шампунь с имбирем" -> ["шампунь", "имбирь"]
+    """
+    stopwords = {
+        "с", "в", "на", "за", "из", "для", "от", "по", "у", "о", "без", "и", "а", "но",
+        "быть", "весь", "этот", "который", "мой", "наш", "ваш"
+    }
+    words = query.lower().replace(',', ' ').replace('.', ' ').split()
+    lemmatized_words = []
+    for word in words:
+        if word not in stopwords:
+            lemmatized_words.append(morph.parse(word)[0].normal_form)
+    return lemmatized_words
 
 # ⚙️ Общая функция — Одинарный поиск (Быстро и Точно)
 def search_products(user_query: str):
     """
-    Основная функция поиска. Возвращает список релевантных товаров 
-    после векторного поиска.
+    Основная функция ГИБРИДНОГО поиска. Комбинирует семантический поиск по фрагментам
+    и поиск по ключевым словам в названии и тегах.
     """
-    return search_products_phase1(user_query)
+    # --- Шаг 0: Очистка запроса для ключевого поиска ---
+    cleaned_query_words = _lemmatize_and_clean_query(user_query)
+
+    # --- Шаг 1: Семантический поиск по фрагментам (как и раньше) ---
+    chunks = search_product_chunks(user_query)
+    
+    # --- Шаг 2: Поиск по ключевым словам ---
+    keyword_products_response = supabase.rpc(
+        "keyword_search_products",
+        {"search_terms": cleaned_query_words} # <-- ИСПОЛЬЗУЕМ ОЧИЩЕННЫЙ ЗАПРОС
+    ).execute()
+    keyword_products = keyword_products_response.data or []
+
+    # --- Шаг 3: Объединение результатов ---
+    # Собираем ID из семантического поиска
+    semantic_product_ids = {chunk['product_id'] for chunk in chunks}
+    # Собираем ID из поиска по ключевым словам
+    keyword_product_ids = {p['id'] for p in keyword_products}
+    # Объединяем уникальные ID
+    all_unique_ids = sorted(list(semantic_product_ids.union(keyword_product_ids)))
+
+    if not all_unique_ids:
+        return [], [] # Ничего не найдено
+
+    # --- Шаг 4: Получение полной информации о товарах ---
+    final_products = get_products_by_ids(all_unique_ids)
+
+    return final_products, chunks

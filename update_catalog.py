@@ -1,208 +1,207 @@
 import os
-import re
+import re # Импортируем модуль re для работы с регулярными выражениями
 import uuid
-from typing import List, Tuple
-
-from docx import Document
+import time
+import logging
+from typing import List, Tuple, Dict
+from docx import Document # Используем только python-docx
 from supabase import create_client, Client
 from dotenv import load_dotenv
 
-# ===================== #
-#   Загрузка .env       #
-# ===================== #
-load_dotenv()
+# 💡 ИЗМЕНЕНИЕ: Импортируем функции для генерации тегов и эмбеддингов
+import config
+import db as db_utils
+from embeddings import generate_search_tags
 
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+DOCX_FILE = "catalog.docx"
 SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "products")
-DOCX_FILE = os.getenv("DOCX_FILE", "catalog.docx")
-
-if not SUPABASE_URL or not SUPABASE_KEY:
-    raise RuntimeError("SUPABASE_URL и/или SUPABASE_KEY не заданы. Проверь .env")
-
-# Инициализация клиента
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-
-# ===================== #
-#   Утилиты             #
-# ===================== #
-def clean_price(text: str) -> int:
-    """
-    Нормализуем цену из ячейки:
-    Примеры входа: '4 600 тг', '4 600', '4600', '4,600', '4 600 KZT'
-    Возвращаем целое число в тинах/тенге (без копеек)
-    """
-    if not text:
-        return 0
-    # оставляем цифры, пробелы, запятую и точку
-    t = re.sub(r"[^\d.,\s]", "", text)
-    # убираем пробелы/узкие пробелы
-    t = t.replace(" ", "").replace("\u202f", "")
-    # запятую трактуем как точку
-    t = t.replace(",", ".")
-    # если есть точка — берём целую часть до точки
-    if "." in t:
-        t = t.split(".", 1)[0]
-    return int(t) if t.isdigit() else 0
-
-def clean_pv(text: str) -> float:
-    """
-    Нормализуем PV (баллы).
-    Примеры: '10', '10.5', '10,5 PV'
-    """
-    if not text:
-        return 0.0
-    t = re.sub(r"[^\d.,]", "", text)  # оставляем только цифры и разделители
-    t = t.replace(",", ".")
-    try:
-        return float(t)
-    except ValueError:
-        return 0.0
-
 
 def guess_ext_and_mime(content_type: str, partname: str) -> Tuple[str, str]:
-    """
-    По docx-part определяем расширение и content-type.
-    """
-    # пример content_type: 'image/jpeg' или 'image/png'
     ext = ""
     mime = content_type or "application/octet-stream"
-
     if partname:
-        # partname выглядит как '/word/media/image1.png'
         _, ext_candidate = os.path.splitext(str(partname))
         if ext_candidate:
             ext = ext_candidate.lower().lstrip(".")
-
     if not ext:
-        if mime == "image/jpeg":
-            ext = "jpg"
-        elif mime == "image/png":
-            ext = "png"
-        elif mime == "image/gif":
-            ext = "gif"
-        elif mime in ("image/webp",):
-            ext = "webp"
-        else:
-            ext = "jpg"  # дефолт
-
+        mime_map = {"image/jpeg": "jpg", "image/png": "png", "image/gif": "gif", "image/webp": "webp"}
+        ext = mime_map.get(mime, "jpg")
     return ext, mime
 
-
-def upload_image_to_supabase(image_bytes: bytes, orig_filename: str, content_type: str = None) -> str:
+def create_and_embed_chunks(product_id: int, product_name: str, description: str, tags: str):
     """
-    Загрузка изображения в Supabase Storage, возврат публичного URL.
+    Создает и загружает чанки для одного товара: название, описание и каждый тег отдельно.
     """
-    # Генерируем уникальное имя
-    path = f"{uuid.uuid4()}_{orig_filename}"
-    options = None
-    if content_type:
-        options = {"content-type": content_type}
+    chunks_to_insert = []
 
-    # Если файл с таким именем случайно уже есть — не хотим падать
-    try:
-        supabase.storage.from_(SUPABASE_BUCKET).remove([path])
-    except Exception:
-        pass
+    # 1. Чанк для названия
+    chunks_to_insert.append({"product_id": product_id, "content": product_name})
 
-    supabase.storage.from_(SUPABASE_BUCKET).upload(path, image_bytes, file_options=options)
-    # Публичный URL (bucket должен быть public, а политика SELECT разрешена)
-    return f"{SUPABASE_URL}/storage/v1/object/public/{SUPABASE_BUCKET}/{path}"
+    # 2. Чанк для описания
+    if description:
+        chunks_to_insert.append({"product_id": product_id, "content": description})
 
+    # 3. Отдельные чанки для каждого тега
+    if tags:
+        tag_list = [tag.strip() for tag in tags.split(',') if tag.strip()]
+        for tag in tag_list:
+            chunks_to_insert.append({"product_id": product_id, "content": tag})
 
-def extract_images_from_cell(cell, doc) -> List[str]:
+    # 4. Генерируем эмбеддинги и готовим к загрузке
+    final_chunks = []
+    for chunk in chunks_to_insert:
+        embedding = db_utils.embed_text(chunk['content'])
+        if embedding:
+            chunk['embedding'] = embedding
+            final_chunks.append(chunk)
+    
+    # 5. Загружаем все чанки для товара одним запросом
+    if final_chunks:
+        db_utils.supabase.table("catalog_chunks").insert(final_chunks).execute()
+        logger.info(f"✅ Загружено {len(final_chunks)} чанков для товара ID {product_id}.")
+
+def process_and_embed_catalog(docx_path: str):
     """
-    Извлекаем все картинки из ячейки таблицы и грузим их в Storage.
-    Возвращаем список публичных URL.
+    Основная функция: парсит таблицу из DOCX, извлекает товары, создает эмбеддинги и загружает в Supabase.
     """
-    image_urls: List[str] = []
-    # Ищем blip'ы (встроенные изображения)
-    blips = cell._element.xpath(".//a:blip")
-    for blip in blips:
-        rid = blip.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed")
-        if not rid:
-            continue
-        image_part = doc.part.related_parts[rid]
-        image_bytes = image_part.blob
-        content_type = getattr(image_part, "content_type", None)
-        partname = getattr(image_part, "partname", None)
-
-        ext, mime = guess_ext_and_mime(content_type, str(partname))
-        filename = f"product.{ext}"
-        url = upload_image_to_supabase(image_bytes, filename, mime)
-        image_urls.append(url)
-    return image_urls
-
-
-# Стало:
-def upsert_product(name: str, description: str, price: int, images: List[str], pv: float, search_tags: str = None):
-    """
-    Обновляем товар. Добавлено поле search_tags с дефолтным значением None.
-    """
-    if not name:
+    if not os.path.exists(docx_path):
+        logger.error(f"Файл каталога не найден: {docx_path}")
         return
-
-    existing = supabase.table("products").select("id").eq("name", name).execute()
-    data = {
-        "name": name,
-        "description": description,
-        "price": price,
-        "images": images,
-        "pv": pv,
-        # 💡 ВАЖНО: Добавляем новое поле в data
-        "search_tags": search_tags 
-    }
-
-    if existing.data:
-        supabase.table("products").update(data).eq("id", existing.data[0]["id"]).execute()
-        print(f"✅ Обновлено: {name} (фото: {len(images)}, PV={pv})")
-    else:
-        supabase.table("products").insert(data).execute()
-        print(f"➕ Добавлено:  {name} (фото: {len(images)}, PV={pv})")
-
-
-def parse_word_and_upload(docx_path: str):
-    """
-    Ожидается таблица с колонками:
-      [0] Фото, [1] Название, [2] Описание, [3] Цена, [4] PV
-    """
-    print(f"📄 Читаю: {docx_path}")
+        
+    logger.info(f"📄 Начинаю обработку файла: {docx_path}")
+    
+    # 1. Очищаем старые данные
+    logger.info("🗑️ Очищаю старые фрагменты (chunks)...")
+    # 💡 ИЗМЕНЕНИЕ: Удаляем записи батчами, чтобы избежать таймаута
+    batch_size = 1000  # Размер батча (можно настроить)
+    while True:
+        # 1. Получаем ID следующего батча
+        res = db_utils.supabase.table("catalog_chunks").select("id").limit(batch_size).execute()
+        
+        # 2. Если данных нет, значит таблица пуста, выходим
+        if not res.data:
+            logger.info("✅ Все старые фрагменты удалены.")
+            break
+            
+        # 3. Собираем ID для удаления и удаляем батч
+        ids_to_delete = [item["id"] for item in res.data]
+        db_utils.supabase.table("catalog_chunks").delete().in_("id", ids_to_delete).execute()
+        logger.info(f"🗑️ Удалено {len(ids_to_delete)} фрагментов (chunks)...")
+        
+        # 4. Если удалили меньше, чем размер батча, это был последний батч.
+        if len(ids_to_delete) < batch_size:
+            logger.info("✅ Все старые фрагменты удалены.")
+            break
+    
+    # 2. Открываем документ и итерируем по таблицам
     doc = Document(docx_path)
+    total_products_processed = 0
 
-    total_rows = 0
-    processed = 0
-
-    for table in doc.tables:
-        for i, row in enumerate(table.rows):
-            if i == 0:
-                maybe_header = " ".join([c.text.lower() for c in row.cells])
-                if any(k in maybe_header for k in ["назв", "опис", "цена", "pv"]):
-                    continue
-
-            total_rows += 1
+    for table_idx, table in enumerate(doc.tables):
+        logger.info(f"--- Обработка таблицы #{table_idx+1} ---")
+        
+        for row_idx, row in enumerate(table.rows):
+            # Пропускаем заголовок таблицы
+            if row_idx == 0:
+                continue
 
             try:
-                name = (row.cells[1].text or "").strip()
-                description = (row.cells[2].text or "").strip()
-                price_text = (row.cells[3].text or "").strip()
-                pv_text = (row.cells[4].text or "").strip()
-            except IndexError:
-                continue
+                # --- 3. Извлечение данных из ячеек ---
+                # Ячейка 0: Фото
+                # Ячейка 1: Название
+                # Ячейка 2: Описание
+                # Ячейка 3: Цена (предполагаем, что цена находится здесь)
+                
+                name_cell = row.cells[1]
+                description_cell = row.cells[2]
+                price_cell = row.cells[3] # Предполагаем, что цена находится в 4-й ячейке
+                
+                product_name = name_cell.text.strip()
+                description = description_cell.text.strip()
+                raw_price = price_cell.text.strip()
+                product_price = None
+                try:
+                    # Удаляем все нечисловые символы, кроме точки/запятой, и пытаемся конвертировать в число
+                    cleaned_price = re.sub(r'[^\d.,]+', '', raw_price).replace(',', '.')
+                    product_price = float(cleaned_price)
+                except ValueError:
+                    logger.warning(f"Не удалось распарсить цену '{raw_price}' для товара '{product_name}'.")
 
-            if not name:
-                continue
+                if not product_name or not description:
+                    logger.warning(f"Пропускаю строку #{row_idx+1}: нет названия или описания.")
+                    continue
 
-            images = extract_images_from_cell(row.cells[0], doc)
-            price = clean_price(price_text)
-            pv = clean_pv(pv_text)
+                logger.info(f"Найдена запись: '{product_name}'")
 
-            upsert_product(name=name, description=description, price=price, images=images, pv=pv)
-            processed += 1
+                # --- 4. Извлечение и загрузка изображения ---
+                image_url = None
+                image_cell = row.cells[0]
+                blips = image_cell._element.xpath(".//a:blip")
+                if blips:
+                    rid = blips[0].get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed")
+                    if rid:
+                        image_part = doc.part.related_parts[rid]
+                        ext, mime = guess_ext_and_mime(image_part.content_type, str(image_part.partname))
+                        
+                        # Загрузка в Supabase Storage
+                        try:
+                            path = f"{uuid.uuid4()}_product.{ext}"
+                            db_utils.supabase.storage.from_(SUPABASE_BUCKET).upload(
+                                path, image_part.blob, file_options={"content-type": mime, "upsert": "true"}
+                            )
+                            image_url = f"{config.SUPABASE_URL}/storage/v1/object/public/{SUPABASE_BUCKET}/{path}"
+                            logger.info(f"🖼️  Изображение для '{product_name}' загружено: {image_url}")
+                        except Exception as img_e:
+                            logger.error(f"❌ Не удалось загрузить изображение для '{product_name}': {img_e}")
+                            image_url = None # Явно сбрасываем URL в случае ошибки
 
-    print(f"✅ Готово. Обработано строк: {processed}/{total_rows}")
+                # --- 5. Умная генерация тегов и обновление товара ---
+                tags = None
+                # Ищем товар в базе по имени, чтобы проверить, нужно ли обновлять теги
+                existing_product_res = db_utils.supabase.table("products").select("description, search_tags").eq("name", product_name).maybe_single().execute()
+                existing_product = existing_product_res.data
+                
+                # Генерируем теги только если товара нет, у него нет тегов, или его описание изменилось.
+                if not existing_product or not existing_product.get("search_tags") or existing_product.get("description") != description:
+                    logger.info(f"Требуется генерация тегов для '{product_name}'. Запускаю LLM...")
+                    tags = generate_search_tags(description)
+                    if tags:
+                        logger.info(f"🏷️  Сгенерированы теги: {tags}")
+                    else:
+                        logger.warning(f"Не удалось сгенерировать теги для '{product_name}'.")
+                else:
+                    logger.info(f"Теги для '{product_name}' уже существуют и актуальны. Пропускаю генерацию.")
+                    tags = existing_product["search_tags"] # Используем существующие теги
 
+                product_data = {
+                    "name": product_name,
+                    "description": description,
+                    "price": product_price, # Добавляем извлеченную цену
+                    "images": [image_url] if image_url else None,
+                    "search_tags": tags,
+                }
+                
+                # Используем upsert для атомарного создания/обновления
+                response = db_utils.supabase.table("products").upsert(product_data, on_conflict="name").execute()
+                product_id = response.data[0]['id']
+                logger.info(f"✅ Товар '{product_name}' (ID: {product_id}) сохранен.")
 
+                # --- 6. 💡 НОВЫЙ ШАГ: Создание и загрузка всех чанков ---
+                # Создаем чанки, только если есть теги (это наш главный поисковый инструмент)
+                if tags:
+                    create_and_embed_chunks(product_id, product_name, description, tags)
+                
+                total_products_processed += 1
+
+            except Exception as e:
+                logger.error(f"❌ Ошибка обработки строки #{row_idx+1}: {e}", exc_info=True)
+            finally:
+                time.sleep(0.1) # Небольшая пауза, чтобы не перегружать API
+
+    logger.info(f"🎉 Готово! Всего обработано и загружено {total_products_processed} товаров.")
 
 if __name__ == "__main__":
-    parse_word_and_upload(DOCX_FILE)
+    process_and_embed_catalog(DOCX_FILE)

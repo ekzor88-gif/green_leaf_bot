@@ -8,33 +8,16 @@ from typing import List, Optional
 from openai import OpenAI
 import config
 from supabase import create_client
+# 💡 ИЗМЕНЕНИЕ: Импортируем общую функцию из db.py, чтобы избежать дублирования
+from db import get_product_text_for_embedding
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# ... (проверки config остаются прежними)
 
 client = OpenAI(api_key=config.OPENAI_API_KEY)
 supabase = create_client(config.SUPABASE_URL, config.SUPABASE_KEY)
 
 EMBED_MODEL = "text-embedding-3-small" # 1536 dims
-
-# =================================================================
-# 💡 ДОБАВЛЕНА: Функция для сбора текста (Используется в backfill)
-# =================================================================
-def get_product_text_for_embedding(product_data: dict) -> str:
-    """Объединяет поля name, description, search_tags и приводит к нижнему регистру."""
-    name = product_data.get('name', '')
-    desc = product_data.get('description', '')
-    tags = product_data.get('search_tags', '')
-
-    combined_text = (
-        f"Товар: {name}\n"
-        f"Теги для поиска: {tags}\n"
-        f"Описание: {desc}"
-    )
-    # КРИТИЧЕСКОЕ ИЗМЕНЕНИЕ: Нормализация к нижнему регистру
-    return combined_text.lower()
 
 
 def generate_search_tags(description: str) -> str:
