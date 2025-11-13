@@ -412,6 +412,7 @@ async def on_product_detail(callback: types.CallbackQuery):
     # ----------------- СБОР ДАННЫХ -----------------
     name = product.get("name") or product.get("Название") or "Без названия"
     price = product.get("price") 
+    pv = product.get("pv")
     price_text = f"{price} тг" if price else "не указана"
     description = product.get("description") or product.get("Описание") or ""
     description = description.strip()
@@ -419,13 +420,23 @@ async def on_product_detail(callback: types.CallbackQuery):
     # --- Поиск URL изображения (логика из вашего кода) ---
     # 💡 УПРОЩЕНИЕ: Оставляем только новую, чистую логику для работы с jsonb-полем 'images'.
     image_url = None
-    images_list = product.get("images") 
-    if images_list and isinstance(images_list, list) and len(images_list) > 0:
-        image_url = images_list[0]
+    images_field = product.get("images")
+    if images_field:
+        try:
+            # 💡 ИСПРАВЛЕНИЕ: Пытаемся распарсить поле как строковое представление списка.
+            # Это исправляет проблему, когда в базе данных 'images' имеет тип TEXT, а не JSONB.
+            if isinstance(images_field, str) and images_field.startswith('['):
+                images_list = ast.literal_eval(images_field)
+                if isinstance(images_list, list) and images_list:
+                    image_url = images_list[0]
+        except (ValueError, SyntaxError):
+            logging.warning(f"Не удалось распарсить поле images: {images_field}")
 
     # ----------------- ФОРМИРОВАНИЕ ТЕКСТА -----------------
     
     header_text = f"✨ <b>{name}</b>\n\n💰 Цена: {price_text}"
+    if pv:
+        header_text += f" |  баллы: {pv} pv"
     full_text = f"{header_text}\n\n{description}"
     
     # ----------------- ОТПРАВКА СООБЩЕНИЙ -----------------
