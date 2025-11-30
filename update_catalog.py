@@ -162,10 +162,13 @@ def process_and_embed_catalog(docx_path: str):
                 tags = None
                 # Ищем товар в базе по имени, чтобы проверить, нужно ли обновлять теги
                 existing_product_res = db_utils.supabase.table("products").select("description, search_tags").eq("name", product_name).maybe_single().execute()
-                existing_product = existing_product_res.data
+                # 💡 ИСПРАВЛЕНИЕ: Добавляем проверку, что ответ от API не пустой (None)
+                # Это защищает от ошибки 'NoneType' object has no attribute 'data' при HTTP-ошибках (например, 406 Not Acceptable)
+                existing_product = existing_product_res.data if existing_product_res else None
                 
                 # Генерируем теги только если товара нет, у него нет тегов, или его описание изменилось.
                 if not existing_product or not existing_product.get("search_tags") or existing_product.get("description") != description:
+
                     logger.info(f"Требуется генерация тегов для '{product_name}'. Запускаю LLM...")
                     tags = generate_search_tags(description)
                     if tags:
