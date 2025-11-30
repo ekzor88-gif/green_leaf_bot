@@ -336,7 +336,7 @@ async def show_page(callback: types.CallbackQuery):
     # ----------------- КНОПКИ ТОВАРОВ -----------------
     buttons = [
         [InlineKeyboardButton(
-            text=f"Подробнее: {p['name']}",
+            text=f": {p['name']}",
             # Здесь предполагается, что в элементах all_products есть 'id'
             callback_data=f"product_{p.get('id')}" 
         )]
