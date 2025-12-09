@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import ast
+import re
 from aiogram import Bot, Dispatcher, Router, F, types
 from aiogram.types import Message, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.filters import Command
@@ -209,7 +210,12 @@ async def on_text(message: Message):
         non_search_stopwords = {"привет", "здравствуй", "здравствуйте", "спасибо", "пожалуйста", "ок", "хорошо", "ладно"}
         if not do_rag_search and len(words) == 1 and words[0] not in non_search_stopwords:
             do_rag_search = True
-            logging.info(f"Принудительный поиск для однословного запроса: '{text}'")
+
+        # 💡 "ЗАЩИТА ОТ ДУРАКА" v3: Если запрос состоит из 2-3 слов, скорее всего, это название товара.
+        # Принудительно включаем поиск. Это решит проблему с "белая фасоль".
+        if not do_rag_search and len(words) in [2, 3] and not any(w in non_search_stopwords for w in words):
+            do_rag_search = True
+
 
         # Инициализируем переменные для контекста
         products_for_text_gen = []
@@ -258,8 +264,12 @@ async def on_text(message: Message):
         # --------------------------------------------------------
         
         if answer:
+            # 💡 ГАРАНТИРОВАННОЕ ИСПРАВЛЕНИЕ: Принудительно заменяем Markdown на HTML-теги.
+            # Это надежнее, чем полагаться на LLM.
+            # Ищем все вхождения **текст** и заменяем на <b>текст</b>.
+            answer = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', answer)
             await asyncio.to_thread(db.save_message, u.id, "assistant", answer)
-            await message.answer(answer)
+            await message.answer(answer, parse_mode=ParseMode.HTML)
 
         # Вывод кнопок для товаров (только если был RAG-поиск и товары найдены)
         # Кнопки должны выводиться только после НОВОГО поиска.
