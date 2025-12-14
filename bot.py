@@ -2,6 +2,7 @@ import asyncio
 import logging
 import ast
 import re
+from typing import Optional
 from aiogram import Bot, Dispatcher, Router, F, types
 from aiogram.types import Message, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.filters import Command
@@ -80,6 +81,22 @@ def get_manager_keyboard():
     ])
     return kb
 
+def extract_price_from_query(text: str) -> Optional[float]:
+    """
+    Извлекает число, похожее на цену, из текста запроса.
+    Ищет числа от 3 до 5 цифр.
+    """
+    # Ищем последовательность из 3-5 цифр, возможно с пробелами
+    match = re.search(r'\b(\d[\d\s]{2,4}\d)\b', text)
+    if not match:
+        match = re.search(r'(\d{3,5})', text) # Попробуем найти просто число
+    
+    if match:
+        try:
+            return float(match.group(1).replace(" ", ""))
+        except (ValueError, IndexError):
+            return None
+    return None
 # ----------------- ОБРАБОТЧИКИ -----------------
 
 @router.message(Command("start"))
@@ -197,25 +214,6 @@ async def on_text(message: Message):
         
         do_rag_search = await asyncio.to_thread(is_product_query, text)
 
-        # 💡 "ЗАЩИТА ОТ ДУРАКА": Если LLM-классификатор не распознал короткий запрос с предлогом,
-        # но он похож на поисковый, принудительно включаем поиск.
-        # Это исправляет проблему с запросами типа "с имбирем", "для волос".
-        common_prepositions = {"с ", "для ", "от ", "из ", "про ", "о "}
-        if not do_rag_search and len(text) < 25 and any(text.lower().startswith(p) for p in common_prepositions):
-            do_rag_search = True
-
-        # 💡 "ЗАЩИТА ОТ ДУРАКА" v2: Если запрос состоит из одного слова и это не стоп-слово,
-        # принудительно считаем его поисковым. Это решает проблему с "чернослив", "имбирь".
-        words = text.lower().split()
-        non_search_stopwords = {"привет", "здравствуй", "здравствуйте", "спасибо", "пожалуйста", "ок", "хорошо", "ладно"}
-        if not do_rag_search and len(words) == 1 and words[0] not in non_search_stopwords:
-            do_rag_search = True
-
-        # 💡 "ЗАЩИТА ОТ ДУРАКА" v3: Если запрос состоит из 2-3 слов, скорее всего, это название товара.
-        # Принудительно включаем поиск. Это решит проблему с "белая фасоль".
-        if not do_rag_search and len(words) in [2, 3] and not any(w in non_search_stopwords for w in words):
-            do_rag_search = True
-
 
         # Инициализируем переменные для контекста
         products_for_text_gen = []
@@ -234,18 +232,59 @@ async def on_text(message: Message):
             products_for_text_gen = final_products
             newly_matched_products = final_products # Этот список используется для кнопок
 
+            # 💡 НОВЫЙ ШАГ: "ВТОРОЙ ШАНС" ДЛЯ ПОИСКА (если первый не сработал)
+            if not newly_matched_products:
+                logging.info(f"Прямой поиск не дал результатов. Ищу альтернативные варианты для: '{text}'")
+                
+                # Сценарий 1: Поиск по цене
+                user_price = extract_price_from_query(text)
+                if user_price:
+                    logging.info(f"Найдена цена в запросе: {user_price}. Запускаю поиск по диапазону цен.")
+                    candidate_products = await asyncio.to_thread(db.search_products_by_price_range, user_price)
+                    if candidate_products:
+                        products_for_text_gen = candidate_products
+                        newly_matched_products = candidate_products
+                        logging.info(f"Поиск по цене нашел {len(candidate_products)} товаров.")
+                
+                # Сценарий 2: Переформулирование запроса с помощью LLM
+                if not newly_matched_products:
+                    reformulated_query = await asyncio.to_thread(db.reformulate_query_with_llm, text)
+                    if reformulated_query:
+                        logging.info(f"Запрос переформулирован в: '{reformulated_query}'. Запускаю повторный поиск.")
+                        final_products, chunks_for_text_gen = await asyncio.to_thread(db.search_products, reformulated_query)
+                        products_for_text_gen = final_products
+                        newly_matched_products = final_products
+
+                # Сценарий 3: Широкий поиск по категории (если все остальное не сработало)
+                if not newly_matched_products:
+                    logging.info(f"Переформулировка не помогла. Запускаю широкий поиск по категории для: '{text}'")
+                    candidate_products = await asyncio.to_thread(db.filter_products_by_category, text)
+                    if candidate_products:
+                        products_for_text_gen = candidate_products
+                        newly_matched_products = candidate_products # Отобразим кандидатов в кнопках
+                        logging.info(f"Широкий поиск нашел {len(candidate_products)} кандидатов. Передаю их LLM для фильтрации.")
+
             # 2. Сохраняем ПОЛНЫЙ список товаров в Supabase для навигации
             await asyncio.to_thread(db.save_last_products, u.id, newly_matched_products)
 
         else:
             # --- СЦЕНАРИЙ 2: ПРОСТОЙ ДИАЛОГ (Проверка на продолжение контекста) ---
             
-            # Это может быть уточняющий вопрос. Загружаем старый контекст, чтобы LLM
-            # могла ответить на вопросы вроде "а сколько стоит второй?".
-            products_for_text_gen = await asyncio.to_thread(db.get_last_products, u.id)
-            # В этом случае фрагменты не передаем, LLM будет опираться на историю диалога.
-            chunks_for_text_gen = []
+            # 💡 КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: Если это не поисковый запрос, мы очищаем контекст,
+            # чтобы бот не предлагал старые товары в ответ на "спасибо" или "нет".
+            # Мы оставим контекст только если это уточняющий вопрос по списку.
+            is_clarification = any(word in text.lower() for word in ["первый", "второй", "третий", "номер", "подробнее", "о нем"])
+            if is_clarification:
+                products_for_text_gen = await asyncio.to_thread(db.get_last_products, u.id)
+            else:
+                await asyncio.to_thread(db.clear_last_products, u.id)
+                products_for_text_gen = []
 
+        # 💡 ФИНАЛЬНАЯ ПРОВЕРКА: Если после всех поисков и фолбэков мы так и не нашли
+        # ни одного товара, мы все равно сгенерируем ответ, но уже без контекста каталога.
+        # Это позволит LLM дать общий совет, как в вашем примере.
+        if not products_for_text_gen:
+            logging.info("Ни один из поисковых механизмов не нашел товаров. Генерирую ответ без RAG-контекста.")
         # --------------------------------------------------------
         # --- ШАГ 2: ГЕНЕРАЦИЯ ОТВЕТА (ОБЩЕЕ) ---
         # --------------------------------------------------------

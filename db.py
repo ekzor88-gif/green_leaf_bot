@@ -4,6 +4,7 @@ import config
 import json 
 import logging
 import asyncio 
+from typing import Optional
 import pymorphy3 # 💡 НОВАЯ БИБЛИОТЕКА
 
 logger = logging.getLogger(__name__)
@@ -167,6 +168,99 @@ def get_products_by_ids(product_ids: list) -> list:
     ).execute()
     
     return response.data or []
+
+def search_products_by_price_range(price: float, price_range: float = 200.0) -> list:
+    """
+    Ищет товары в заданном ценовом диапазоне.
+    """
+    min_price = price - price_range
+    max_price = price + price_range
+    
+    logger.info(f"[DB] Ищу товары в диапазоне цен: {min_price} - {max_price}")
+    
+    try:
+        response = (
+            supabase.table("products")
+            .select("*")
+            .gte("price", min_price)
+            .lte("price", max_price)
+            .order("price", desc=False) # Сортируем от дешевых к дорогим
+            .execute()
+        )
+        products = response.data or []
+        logger.info(f"[DB] Поиск по цене нашел {len(products)} товаров.")
+        return products
+    except Exception as e:
+        logger.error(f"[DB] Ошибка при поиске по диапазону цен: {e}")
+        return []
+
+def filter_products_by_category(query: str) -> list:
+    """
+    Извлекает категорию из запроса и ищет ВСЕ товары в этой категории.
+    Используется, когда основной поиск не дал результатов.
+    """
+    try:
+        # Просим LLM извлечь только категорию
+        response = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "Твоя задача - извлечь из запроса пользователя ОДНО слово, обозначающее категорию товара (например, 'шампунь', 'крем', 'чай', 'бальзам', 'капсулы'). Если категорию извлечь не удается, верни пустую строку."},
+                {"role": "user", "content": query}
+            ],
+            temperature=0
+        )
+        category = response.choices[0].message.content.strip().lower()
+
+        if not category:
+            return []
+
+        logger.info(f"[DB] Извлечена категория для широкого поиска: '{category}'")
+
+        # Ищем все товары, где название или теги содержат эту категорию
+        # Используем существующую RPC-функцию для поиска по ключевым словам.
+        keyword_products_response = supabase.rpc(
+            "keyword_search_products",
+            {"search_terms": [category]}
+        ).execute()
+
+        products = keyword_products_response.data or []
+        logger.info(f"[DB] Широкий поиск нашел {len(products)} товаров в категории '{category}'.")
+        return products
+
+    except Exception as e:
+        logger.error(f"[DB] Ошибка при широком поиске по категории: {e}")
+        return []
+
+
+
+def reformulate_query_with_llm(query: str) -> Optional[str]:
+    """
+    Использует LLM для извлечения ключевых поисковых терминов из сложного запроса.
+    "Как принимать женьшень и krill oil" -> "женьшень, масло криля"
+    """
+    try:
+        system_prompt = (
+            "Твоя задача — превратить запрос пользователя в простой и чистый поисковый запрос. "
+            "**Обязательно исправляй возможные опечатки в словах (например, 'шампун' -> 'шампунь', 'крил' -> 'криль').** "
+            "Извлеки только названия товаров, их компоненты или категории. "
+            "Также переводи иностранные названия на русский (например, 'krill oil' -> 'масло криля', 'ginseng' -> 'женьшень'). "
+            "Убери все лишние слова, такие как 'как принимать', 'сколько стоит', 'есть ли у вас'. "
+            "Результат верни в виде строки, где ключевые слова разделены запятой. "
+            "Если извлечь ключевые слова не удалось, верни пустую строку."
+        )
+        response = openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": query}
+            ],
+            temperature=0
+        )
+        reformulated_query = response.choices[0].message.content.strip()
+        return reformulated_query if reformulated_query else None
+    except Exception as e:
+        logger.error(f"[DB] Ошибка при переформулировании запроса: {e}")
+        return None
 
 # 🚀 ПОЛНОСТЬЮ ПЕРЕРАБОТАННАЯ ФУНКЦИЯ
 def _lemmatize_and_clean_query(query: str) -> list[str]:
