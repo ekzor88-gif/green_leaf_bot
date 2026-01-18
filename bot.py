@@ -19,8 +19,12 @@ print("✅ [BOT] Модуль LLM загружен.")
 
 import config
 
-import db 
-print("✅ [BOT] Модуль DB загружен.")
+try:
+    import db 
+    print("✅ [BOT] Модуль DB загружен.")
+except Exception as e:
+    logging.critical(f"❌ КРИТИЧЕСКАЯ ОШИБКА при импорте DB: {e}")
+    raise e
 
 
 logging.basicConfig(level=logging.INFO)

@@ -19,9 +19,18 @@ print("✅ [DB] Supabase клиент создан.")
 print("⏳ [DB] Подключение к OpenAI...")
 openai_client = OpenAI(api_key=config.OPENAI_API_KEY)
 
-print("⏳ [DB] Загрузка словарей pymorphy3 (это может занять время)...")
-morph = pymorphy3.MorphAnalyzer() # 💡 Инициализация анализатора
-print("✅ [DB] Морфологический анализатор загружен.")
+# 💡 ОПТИМИЗАЦИЯ ПАМЯТИ (Lazy Loading)
+# Мы не создаем анализатор сразу, чтобы бот не падал при старте из-за нехватки RAM.
+_morph = None
+
+def get_morph():
+    """Ленивая загрузка морфологического анализатора."""
+    global _morph
+    if _morph is None:
+        logger.info("⏳ [DB] Инициализация pymorphy3 (первый запуск)...")
+        _morph = pymorphy3.MorphAnalyzer()
+        logger.info("✅ [DB] Анализатор загружен.")
+    return _morph
 
 # 💡 ОПТИМИЗАЦИЯ: Выносим стоп-слова в константу, чтобы не создавать set каждый раз
 STOPWORDS = {
@@ -344,7 +353,8 @@ def _get_lemmas(query: str) -> list[str]:
     words = _get_clean_words(query)
     lemmas = set()
     for word in words:
-        normal_form = morph.parse(word)[0].normal_form
+        # 💡 ИСПОЛЬЗУЕМ ФУНКЦИЮ get_morph() ВМЕСТО ГЛОБАЛЬНОЙ ПЕРЕМЕННОЙ
+        normal_form = get_morph().parse(word)[0].normal_form
         lemmas.add(normal_form)
     return list(lemmas)
 
