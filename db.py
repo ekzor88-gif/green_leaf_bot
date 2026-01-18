@@ -11,10 +11,17 @@ import pymorphy3 # 💡 НОВАЯ БИБЛИОТЕКА
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
+print("⏳ [DB] Подключение к Supabase...")
 # 💡 Инициализация синхронных клиентов
 supabase = create_client(config.SUPABASE_URL, config.SUPABASE_KEY)
+print("✅ [DB] Supabase клиент создан.")
+
+print("⏳ [DB] Подключение к OpenAI...")
 openai_client = OpenAI(api_key=config.OPENAI_API_KEY)
+
+print("⏳ [DB] Загрузка словарей pymorphy3 (это может занять время)...")
 morph = pymorphy3.MorphAnalyzer() # 💡 Инициализация анализатора
+print("✅ [DB] Морфологический анализатор загружен.")
 
 # 💡 ОПТИМИЗАЦИЯ: Выносим стоп-слова в константу, чтобы не создавать set каждый раз
 STOPWORDS = {

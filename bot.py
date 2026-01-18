@@ -11,12 +11,16 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.enums.chat_action import ChatAction # <-- ДОБАВИТЬ ЭТОТ ИМПОРТ В НАЧАЛО ФАЙЛА
 
+print("🚀 [BOT] Запуск: импорт модулей...")
 
 # ❌ ИСПРАВЛЕНИЕ: Заменяем удаленный get_query_type на is_product_query
 from llm import generate_answer, is_product_query 
+print("✅ [BOT] Модуль LLM загружен.")
 
 import config
-import db # Импортируем модуль db
+
+import db 
+print("✅ [BOT] Модуль DB загружен.")
 
 
 logging.basicConfig(level=logging.INFO)
@@ -599,6 +603,7 @@ async def on_product_detail(callback: types.CallbackQuery):
     await callback.answer()
 
 async def main():
+    print("🔄 [BOT] Запуск polling (ожидание сообщений)...")
     await dp.start_polling(bot)
 
 
