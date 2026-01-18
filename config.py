@@ -2,11 +2,8 @@ import os
 from dotenv import load_dotenv, find_dotenv
 
 # найдём .env начиная с текущей папки и выше
-dotenv_path = find_dotenv(usecwd=True)
-if dotenv_path:
-    load_dotenv(dotenv_path)
-else:
-    print(f"⚠️ .env не найден. Текущая папка: {os.getcwd()}")
+# Если файла нет, load_dotenv просто ничего не сделает (это нормально для сервера)
+load_dotenv(find_dotenv(usecwd=True))
 
 # Поддержим оба названия переменной:
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN") or os.getenv("BOT_TOKEN")
@@ -27,4 +24,5 @@ if not SUPABASE_KEY:  missing.append("SUPABASE_KEY")
 if not OPENAI_API_KEY: missing.append("OPENAI_API_KEY")
 
 if missing:
+    print(f"⚠️ .env не найден или пуст. Текущая папка: {os.getcwd()}")
     raise ValueError("❌ Не найдены переменные в .env: " + ", ".join(missing))
