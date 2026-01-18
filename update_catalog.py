@@ -114,21 +114,35 @@ def process_and_embed_catalog(docx_path: str):
                 # Ячейка 1: Название
                 # Ячейка 2: Описание
                 # Ячейка 3: Цена (предполагаем, что цена находится здесь)
+                # 💡 ИЗМЕНЕНИЕ: Ячейка 4: PV (баллы)
                 
                 name_cell = row.cells[1]
                 description_cell = row.cells[2]
                 price_cell = row.cells[3] # Предполагаем, что цена находится в 4-й ячейке
+                pv_cell = row.cells[4] # 💡 НОВОЕ: Извлекаем ячейку с PV
                 
                 product_name = name_cell.text.strip()
                 description = description_cell.text.strip()
                 raw_price = price_cell.text.strip()
+                raw_pv = pv_cell.text.strip() # 💡 НОВОЕ: Получаем сырое значение PV
+
                 product_price = None
+                product_pv = None
+
                 try:
                     # Удаляем все нечисловые символы, кроме точки/запятой, и пытаемся конвертировать в число
                     cleaned_price = re.sub(r'[^\d.,]+', '', raw_price).replace(',', '.')
                     product_price = float(cleaned_price)
                 except ValueError:
                     logger.warning(f"Не удалось распарсить цену '{raw_price}' для товара '{product_name}'.")
+                
+                # 💡 НОВОЕ: Парсим PV, удаляя буквы и пробелы
+                try:
+                    cleaned_pv = re.sub(r'[^\d.,]+', '', raw_pv).replace(',', '.')
+                    if cleaned_pv:
+                        product_pv = float(cleaned_pv)
+                except ValueError:
+                    logger.warning(f"Не удалось распарсить PV '{raw_pv}' для товара '{product_name}'.")
 
                 if not product_name or not description:
                     logger.warning(f"Пропускаю строку #{row_idx+1}: нет названия или описания.")
@@ -183,6 +197,7 @@ def process_and_embed_catalog(docx_path: str):
                     "name": product_name,
                     "description": description,
                     "price": product_price, # Добавляем извлеченную цену
+                    "pv": product_pv,       # 💡 НОВОЕ: Добавляем извлеченные баллы
                     "images": [image_url] if image_url else None,
                     "search_tags": tags,
                 }

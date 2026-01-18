@@ -2,10 +2,11 @@ import asyncio
 import logging
 import ast
 import re
+import time
 from typing import Optional
 from aiogram import Bot, Dispatcher, Router, F, types
 from aiogram.types import Message, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
-from aiogram.filters import Command
+from aiogram.filters import Command, CommandObject # 💡 Добавили CommandObject для аргументов
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.enums.chat_action import ChatAction # <-- ДОБАВИТЬ ЭТОТ ИМПОРТ В НАЧАЛО ФАЙЛА
@@ -30,7 +31,9 @@ dp = Dispatcher()
 router = Router()
 dp.include_router(router)
 
-MANAGER_PHONE = "77012706305"  # без +, Казахстан пример
+# 🛡️ НАСТРОЙКИ БЕЗОПАСНОСТИ
+MAX_MESSAGE_LENGTH = 2000  # Максимальная длина сообщения (символов)
+USER_LAST_MSG_TIME = {}    # Словарь для анти-спама {user_id: timestamp}
 
 # --- Загрузка текста инструкции при старте ---
 try:
@@ -69,13 +72,13 @@ def get_catalog_inline_keyboard():
     )
     return kb
 
-def get_manager_keyboard():
+def get_manager_keyboard(phone: str):
     """Inline-кнопка для связи с менеджером через WhatsApp."""
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(
                 text="📞 Связаться в WhatsApp",
-                url=f"https://wa.me/{MANAGER_PHONE}"
+                url=f"https://wa.me/{phone}"
             )
         ],
     ])
@@ -100,21 +103,28 @@ def extract_price_from_query(text: str) -> Optional[float]:
 # ----------------- ОБРАБОТЧИКИ -----------------
 
 @router.message(Command("start"))
-async def on_start(message: Message):
+async def on_start(message: Message, command: CommandObject):
     u = message.from_user
     # ⚠️ ОБЕРТКА DB: upsert_user
     await asyncio.to_thread(db.upsert_user, u.id, u.first_name or "", u.last_name or "", u.username or "")
     
-    # 1. Отправляем приветствие и постоянно видимое Reply-меню
+    # 💡 ПРОВЕРКА РЕФЕРАЛЬНОЙ ССЫЛКИ (Deep Linking)
+    # Если есть аргумент (например, /start partner1), пробуем привязать партнера
+    args = command.args
+    if args:
+        # Запускаем привязку в фоне, не блокируя ответ
+        await asyncio.to_thread(db.assign_partner_by_code, u.id, args)
+
+    # Отправляем приветствие и постоянно видимое Reply-меню
     await message.answer(
-        "🌿 **Добро пожаловать! Мы вас очень ждали.**\n\n"
+        "🌿 <b>Добро пожаловать! Мы вас очень ждали.</b>\n\n"
         "Я — ваш личный помощник в мире эко-товаров GreenLeaf.\n\n"
-        "Этот бот — авторская разработка **семьи Артемьевых**,  партнеров компании в г. Щучинск. Мы вложили сюда свой опыт, чтобы вы могли находить любимые товары за секунды.\n\n"
-        "✍️ **Как это работает?**\n"
+        "Этот бот — авторская разработка <b>семьи Артемьевых</b>, партнеров компании в г. Щучинск. Мы вложили сюда свой опыт, чтобы вы могли находить любимые товары за секунды.\n\n"
+        "✍️ <b>Как это работает?</b>\n"
         "Не нужно листать длинные каталоги. Просто напишите в чат, что вы ищете:\n"
-        "— *Чай для похудения*\n"
-        "— *Шампунь от выпадения*\n"
-        "— *Гель для стирки*\n\n"
+        "— <i>Чай для похудения</i>\n"
+        "— <i>Шампунь от выпадения</i>\n"
+        "— <i>Гель для стирки</i>\n\n"
         "Попробуйте прямо сейчас! 👇\n"
         "А еще подумайте, какую покупку вы бы хотели сделать в ближайшее время, возможно тут вы найдете что-то интересное.\n\n",
         reply_markup=get_main_reply_keyboard() # <-- Используем Reply Keyboard
@@ -137,9 +147,12 @@ async def handle_view_catalog_reply(message: Message):
 # Обработчик нажатия на кнопку "Связь с менеджером"
 @router.message(F.text == "📞 Связь с менеджером")
 async def handle_manager_reply(message: Message):
+    # 💡 Получаем динамический номер
+    phone = await asyncio.to_thread(db.get_manager_phone_for_user, message.from_user.id)
+    
     await message.answer(
         "Вы можете связаться с нашим менеджером 👇",
-        reply_markup=get_manager_keyboard()
+        reply_markup=get_manager_keyboard(phone)
     )
 
 # Обработчик нажатия на кнопку "Инструкция"
@@ -164,6 +177,23 @@ async def on_media(message: Message):
 @router.message(F.text)
 async def on_text(message: Message):
     
+    # 🛡️ 1. АНТИ-СПАМ ПРОВЕРКА
+    user_id = message.from_user.id
+    current_time = time.time()
+    last_time = USER_LAST_MSG_TIME.get(user_id, 0)
+
+    # Если прошло меньше 2 секунд с последнего сообщения
+    if current_time - last_time < 2.0:
+        # Можно просто игнорировать или мягко предупредить (лучше игнорировать, чтобы не спамить в ответ)
+        return 
+    
+    USER_LAST_MSG_TIME[user_id] = current_time
+
+    # 🛡️ 2. ПРОВЕРКА ДЛИНЫ СООБЩЕНИЯ
+    if len(message.text) > MAX_MESSAGE_LENGTH:
+        await message.answer("Сообщение слишком длинное. Пожалуйста, сформулируйте вопрос короче.")
+        return
+
     # ... (Оставим реакцию и typing_task без изменений)
     typing_task = asyncio.create_task(
         # ... (код для отправки "печатает")
@@ -193,9 +223,11 @@ async def on_text(message: Message):
 
         # Проверка на прямой запрос менеджера
         if any(word in text.lower() for word in ["менеджер", "заказ", "связь", "оператор"]):
+            # 💡 Получаем динамический номер
+            phone = await asyncio.to_thread(db.get_manager_phone_for_user, u.id)
             await message.answer(
                 "Вы можете связаться с нашим менеджером 👇",
-                reply_markup=get_manager_keyboard()
+                reply_markup=get_manager_keyboard(phone)
             )
             # 💡 ВАЖНО: При запросе менеджера очищаем контекст товаров, так как диалог окончен
             await asyncio.to_thread(db.clear_last_products, u.id)
@@ -213,6 +245,15 @@ async def on_text(message: Message):
         # --------------------------------------------------------
         
         do_rag_search = await asyncio.to_thread(is_product_query, text)
+
+        # 💡 СТРАХОВКА: Если LLM считает, что это не товар, но в базе есть точное совпадение — ищем.
+        # Это решает проблему, когда LLM думает, что "жидкое иглоукалывание" — это процедура, а не товар.
+        if not do_rag_search:
+            # Проверяем быстро, есть ли такой товар по точному вхождению
+            exact_hits = await asyncio.to_thread(db.search_products_by_exact_match, text)
+            if exact_hits:
+                logging.info(f"🛡️ Сработала страховка: '{text}' найден в базе, хотя LLM классифицировала как не-товар.")
+                do_rag_search = True
 
 
         # Инициализируем переменные для контекста
@@ -478,9 +519,11 @@ async def on_product_detail(callback: types.CallbackQuery):
     images_field = product.get("images")
     if images_field:
         try:
-            # 💡 ИСПРАВЛЕНИЕ: Пытаемся распарсить поле как строковое представление списка.
-            # Это исправляет проблему, когда в базе данных 'images' имеет тип TEXT, а не JSONB.
-            if isinstance(images_field, str) and images_field.startswith('['):
+            # 1. Если это уже список (JSONB распарсился автоматически)
+            if isinstance(images_field, list) and images_field:
+                image_url = images_field[0]
+            # 2. Если это строка (TEXT или JSON в виде строки)
+            elif isinstance(images_field, str) and images_field.startswith('['):
                 images_list = ast.literal_eval(images_field)
                 if isinstance(images_list, list) and images_list:
                     image_url = images_list[0]
@@ -538,11 +581,14 @@ async def on_product_detail(callback: types.CallbackQuery):
         )
 
     # ----------------- КНОПКИ -----------------
-    # 💡 ИЗМЕНЕНИЕ: Кнопка теперь сразу ведет на WhatsApp, как в главном меню.
+    # 💡 ИЗМЕНЕНИЕ: Получаем динамический номер менеджера
+    phone = await asyncio.to_thread(db.get_manager_phone_for_user, user_id)
+    
+    # Кнопка теперь сразу ведет на WhatsApp
     buttons = [
         [InlineKeyboardButton(
             text="📞 Связаться в WhatsApp",
-            url=f"https://wa.me/{MANAGER_PHONE}"
+            url=f"https://wa.me/{phone}"
         )]
     ]
     await callback.message.answer(

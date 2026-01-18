@@ -5,6 +5,7 @@ import json
 import logging
 import asyncio 
 from typing import Optional
+from datetime import datetime, timezone # 💡 Для проверки даты подписки
 import pymorphy3 # 💡 НОВАЯ БИБЛИОТЕКА
 
 logger = logging.getLogger(__name__)
@@ -15,6 +16,11 @@ supabase = create_client(config.SUPABASE_URL, config.SUPABASE_KEY)
 openai_client = OpenAI(api_key=config.OPENAI_API_KEY)
 morph = pymorphy3.MorphAnalyzer() # 💡 Инициализация анализатора
 
+# 💡 ОПТИМИЗАЦИЯ: Выносим стоп-слова в константу, чтобы не создавать set каждый раз
+STOPWORDS = {
+    "с", "в", "на", "за", "из", "для", "от", "по", "у", "о", "без", "и", "а", "но",
+    "быть", "весь", "этот", "который", "мой", "наш", "ваш", "как", "где", "сколько"
+}
 
 # ==============================================================================
 # 1. ФУНКЦИИ РАБОТЫ С БАЗОЙ ДАННЫХ (С КОРРЕКЦИЕЙ ID И КОНТЕКСТА)
@@ -25,12 +31,16 @@ def upsert_user(user_id: int, first_name: str, last_name: str, username: str):
     Обновляет или создает пользователя. 
     💡 Коррекция: Здесь используется 'user_id', что корректно.
     """
-    return supabase.table("users").upsert({
-        "user_id": user_id,
-        "first_name": first_name,
-        "last_name": last_name,
-        "username": username,
-    }).execute()
+    try:
+        return supabase.table("users").upsert({
+            "user_id": user_id,
+            "first_name": first_name,
+            "last_name": last_name,
+            "username": username,
+        }).execute()
+    except Exception as e:
+        logger.error(f"Ошибка upsert_user: {e}")
+        return None
 
 
 def save_message(user_id: int, role: str, content: str):
@@ -101,6 +111,59 @@ def clear_last_products(user_id: int) -> None:
     except Exception as e:
         logger.error("Ошибка при очистке последних продуктов для %d: %s", user_id, e)
         
+
+# ==============================================================================
+# 🚀 НОВЫЕ ФУНКЦИИ ДЛЯ РАБОТЫ С ПАРТНЕРАМИ
+# ==============================================================================
+
+def assign_partner_by_code(user_id: int, referral_code: str):
+    """
+    Находит партнера по коду и привязывает его к пользователю.
+    """
+    try:
+        code_clean = referral_code.strip() # Убираем лишние пробелы
+        # 1. Ищем партнера по коду
+        res = supabase.table("partners").select("id").eq("referral_code", code_clean).maybe_single().execute()
+        if res.data:
+            partner_id = res.data["id"]
+            # 2. Привязываем к пользователю
+            supabase.table("users").update({"partner_id": partner_id}).eq("user_id", user_id).execute()
+            logger.info(f"Пользователь {user_id} привязан к партнеру {referral_code} (ID: {partner_id})")
+            return True
+    except Exception as e:
+        logger.error(f"Ошибка при привязке партнера: {e}")
+    return False
+
+def get_manager_phone_for_user(user_id: int) -> str:
+    """
+    Возвращает номер телефона менеджера для конкретного пользователя.
+    Логика:
+    1. Если у юзера есть партнер И подписка партнера активна -> номер партнера.
+    2. Иначе -> дефолтный номер из конфига.
+    """
+    default_phone = config.DEFAULT_MANAGER_PHONE
+    
+    try:
+        # Запрашиваем данные пользователя вместе с данными партнера
+        # Синтаксис select: "partner_id, partners(...)" позволяет сделать JOIN
+        res = supabase.table("users").select("partner_id, partners(phone_number, subscription_end_date)").eq("user_id", user_id).single().execute()
+        
+        if res.data and res.data.get("partners"):
+            partner = res.data["partners"]
+            end_date_str = partner.get("subscription_end_date")
+            
+            if end_date_str:
+                # Парсим дату (Supabase возвращает ISO формат)
+                end_date = datetime.fromisoformat(end_date_str.replace('Z', '+00:00'))
+                # Проверяем, не истекла ли подписка
+                if end_date > datetime.now(timezone.utc):
+                    return partner.get("phone_number")
+    
+    except Exception as e:
+        logger.error(f"Ошибка при получении номера менеджера для {user_id}: {e}")
+    
+    return default_phone
+
 # ==============================================================================
 # 2. ФУНКЦИИ LLM и УСКОРЕННЫЙ ПОИСК (ОСТАВЛЕНЫ БЕЗ ИЗМЕНЕНИЙ)
 # ==============================================================================
@@ -262,22 +325,48 @@ def reformulate_query_with_llm(query: str) -> Optional[str]:
         logger.error(f"[DB] Ошибка при переформулировании запроса: {e}")
         return None
 
-# 🚀 ПОЛНОСТЬЮ ПЕРЕРАБОТАННАЯ ФУНКЦИЯ
-def _lemmatize_and_clean_query(query: str) -> list[str]:
-    """
-    Приводит слова в запросе к начальной форме (лемматизирует) и удаляет стоп-слова.
-    "шампунь с имбирем" -> ["шампунь", "имбирь"]
-    """
-    stopwords = {
-        "с", "в", "на", "за", "из", "для", "от", "по", "у", "о", "без", "и", "а", "но",
-        "быть", "весь", "этот", "который", "мой", "наш", "ваш"
-    }
+def _get_clean_words(query: str) -> list[str]:
+    """Разбивает запрос на слова и убирает стоп-слова."""
     words = query.lower().replace(',', ' ').replace('.', ' ').split()
-    lemmatized_words = []
+    return [w for w in words if w not in STOPWORDS]
+
+def _get_lemmas(query: str) -> list[str]:
+    """
+    Возвращает список лемм (начальных форм) слов из запроса.
+    """
+    words = _get_clean_words(query)
+    lemmas = set()
     for word in words:
-        if word not in stopwords:
-            lemmatized_words.append(morph.parse(word)[0].normal_form)
-    return lemmatized_words
+        normal_form = morph.parse(word)[0].normal_form
+        lemmas.add(normal_form)
+    return list(lemmas)
+
+def search_products_by_exact_match(query: str) -> list:
+    """
+    Ищет точное совпадение фразы в названии или тегах.
+    Приоритетный поиск для фраз типа 'жидкое иглоукалывание'.
+    """
+    try:
+        # Очищаем запрос от лишних символов, но оставляем пробелы
+        clean_query = query.lower().strip()
+        if not clean_query:
+            return []
+            
+        # 💡 ИЗМЕНЕНИЕ: Используем RPC для точного поиска фразы.
+        # Передаем фразу как один элемент массива.
+        # Это ищет: name ILIKE '%фраза%' OR search_tags ILIKE '%фраза%'
+        response = supabase.rpc(
+            "keyword_search_products", 
+            {"search_terms": [clean_query]} 
+        ).execute()
+        
+        data = response.data or []
+        if data:
+            logger.info(f"[DB] ✅ Точный поиск нашел {len(data)} товаров по запросу '{clean_query}'")
+        return data
+    except Exception as e:
+        logger.error(f"[DB] Ошибка при точном поиске: {e}")
+        return []
 
 # ⚙️ Общая функция — Одинарный поиск (Быстро и Точно)
 def search_products(user_query: str):
@@ -285,36 +374,58 @@ def search_products(user_query: str):
     Основная функция ГИБРИДНОГО поиска. Комбинирует семантический поиск по фрагментам
     и поиск по ключевым словам в названии и тегах.
     """
+    logger.info(f"🔎 Запуск поиска товаров по запросу: '{user_query}'")
+    
+    # --- Шаг 1: Точный поиск по фразе (Самый приоритетный) ---
+    # Решает проблему "жидкое иглоукалывание", находя фразу целиком в названии или тегах
+    exact_products_data = search_products_by_exact_match(user_query)
+    exact_ids = {p['id'] for p in exact_products_data}
+    if exact_ids:
+        logger.info(f"[DB] ✅ Точный поиск нашел ID: {exact_ids}")
 
-    # --- Шаг 0: Очистка запроса для ключевого поиска ---
-    cleaned_query_words = _lemmatize_and_clean_query(user_query)
-
-    # --- Шаг 1: Семантический поиск по фрагментам (как и раньше) ---
+    # --- Шаг 2: Семантический поиск по фрагментам ---
     chunks = search_product_chunks(user_query)
+    chunk_ids = {chunk['product_id'] for chunk in chunks}
+    if chunk_ids:
+        logger.info(f"[DB] ✅ Векторный поиск нашел ID: {chunk_ids}")
     
-    # --- Шаг 2: Поиск по ключевым словам ---
-    keyword_products_response = supabase.rpc(
-        "keyword_search_products",
-        {"search_terms": cleaned_query_words} # <-- ИСПОЛЬЗУЕМ ОЧИЩЕННЫЙ ЗАПРОС
-    ).execute() # 💡 ВАЖНО: Убедитесь, что RPC 'keyword_search_products' ищет по полю 'search_tags'
-                # и корректно обрабатывает лемматизированные слова.
-                # В идеале, 'search_tags' должен быть проиндексирован для полнотекстового поиска.
-    keyword_products = keyword_products_response.data or []
+    # --- Шаг 3: Поиск по ключевым словам (Раздельный) ---
+    keyword_ids = set()
+    
+    # 3.1 Поиск по леммам (жидкое -> жидкий)
+    lemmas = _get_lemmas(user_query)
+    if lemmas:
+        try:
+            res_lemma = supabase.rpc("keyword_search_products", {"search_terms": lemmas}).execute()
+            if res_lemma.data:
+                found_ids = {p['id'] for p in res_lemma.data}
+                keyword_ids.update(found_ids)
+                logger.info(f"[DB] ✅ Поиск по леммам {lemmas} нашел ID: {found_ids}")
+        except Exception as e:
+            logger.warning(f"[DB] Ошибка поиска по леммам: {e}")
 
-    # --- Шаг 3: Объединение результатов ---
-    # 💡 Убедитесь, что 'product_id' в chunks и 'id' в keyword_products имеют одинаковый тип для корректного объединения.
+    # 3.2 Поиск по исходным словам (жидкое -> жидкое) - если они отличаются от лемм
+    clean_words = _get_clean_words(user_query)
+    if clean_words:
+        try:
+            res_orig = supabase.rpc("keyword_search_products", {"search_terms": clean_words}).execute()
+            if res_orig.data:
+                found_ids = {p['id'] for p in res_orig.data}
+                keyword_ids.update(found_ids)
+                logger.info(f"[DB] ✅ Поиск по словам {clean_words} нашел ID: {found_ids}")
+        except Exception as e:
+            logger.warning(f"[DB] Ошибка поиска по словам: {e}")
+
+    # --- Шаг 4: Объединение результатов ---
+    # Объединяем ID из всех трех источников
+    all_unique_ids = sorted(list(exact_ids | chunk_ids | keyword_ids))
     
-    # Собираем ID из семантического поиска
-    semantic_product_ids = {chunk['product_id'] for chunk in chunks}
-    # Собираем ID из поиска по ключевым словам
-    keyword_product_ids = {p['id'] for p in keyword_products}
-    # Объединяем уникальные ID
-    all_unique_ids = sorted(list(semantic_product_ids.union(keyword_product_ids)))
+    logger.info(f"[DB] 🏁 Итого найдено уникальных товаров: {len(all_unique_ids)} (IDs: {all_unique_ids})")
 
     if not all_unique_ids:
         return [], [] # Ничего не найдено
 
-    # --- Шаг 4: Получение полной информации о товарах ---
+    # --- Шаг 5: Получение полной информации о товарах ---
     final_products = get_products_by_ids(all_unique_ids)
 
     return final_products, chunks

@@ -15,6 +15,9 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
+# Номер "Дефолтного менеджера" (Владельца бота)
+DEFAULT_MANAGER_PHONE = "77012706305" 
+
 GOOGLE_SHEET_URL = "https://docs.google.com/spreadsheets/d/1mwPaoPZce1BFazHaPFkH1nyLcei9iJpAeNe6lhRVL3M/edit?usp=sharing"
 
 missing = []
