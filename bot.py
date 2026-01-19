@@ -144,8 +144,10 @@ async def on_start(message: Message, command: CommandObject):
 # Обработчик команды /help
 @router.message(Command("help"))
 async def on_help(message: Message):
-    
-ть каталог"
+    await message.answer(USER_GUIDE_TEXT)
+
+# Обработчик нажатия на кнопку "Просмотреть каталог"
+@router.message(F.text == "⭐ Просмотреть каталог")
 async def handle_view_catalog_reply(message: Message):
     await message.answer(
         "Вот ссылка на наш полный и актуальный каталог. Вы можете просмотреть его прямо сейчас:",
@@ -168,6 +170,7 @@ async def handle_manager_reply(message: Message):
 async def handle_guide_reply(message: Message):
     await message.answer(USER_GUIDE_TEXT)
 
+# Обработчик для нетекстовых сообщений
 @router.message(~F.text)
 async def on_media(message: Message):
     """Отвечает на нетекстовые сообщения.""" 
