@@ -1,4 +1,4 @@
-from supabase import create_client
+from supabase import create_client, ClientOptions
 from openai import OpenAI
 import config
 import json 
@@ -12,8 +12,10 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
 print("⏳ [DB] Подключение к Supabase...")
-# 💡 Инициализация синхронных клиентов
-supabase = create_client(config.SUPABASE_URL, config.SUPABASE_KEY)
+# 💡 Инициализация синхронных клиентов с увеличенным таймаутом
+# Это нужно, чтобы "холодный старт" базы на бесплатном тарифе не вызывал ошибку.
+options = ClientOptions(postgrest_client_timeout=30)
+supabase = create_client(config.SUPABASE_URL, config.SUPABASE_KEY, options=options)
 print("✅ [DB] Supabase клиент создан.")
 
 print("⏳ [DB] Подключение к OpenAI...")
