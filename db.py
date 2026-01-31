@@ -1,12 +1,10 @@
 from supabase import create_client, ClientOptions
 from openai import OpenAI
 import config
-import json 
 import logging
 import asyncio 
 from typing import Optional
 from datetime import datetime, timezone # 💡 Для проверки даты подписки
-import pymorphy3 # 💡 НОВАЯ БИБЛИОТЕКА
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -20,19 +18,6 @@ print("✅ [DB] Supabase клиент создан.")
 
 print("⏳ [DB] Подключение к OpenAI...")
 openai_client = OpenAI(api_key=config.OPENAI_API_KEY)
-
-# 💡 ОПТИМИЗАЦИЯ ПАМЯТИ (Lazy Loading)
-# Мы не создаем анализатор сразу, чтобы бот не падал при старте из-за нехватки RAM.
-_morph = None
-
-def get_morph():
-    """Ленивая загрузка морфологического анализатора."""
-    global _morph
-    if _morph is None:
-        logger.info("⏳ [DB] Инициализация pymorphy3 (первый запуск)...")
-        _morph = pymorphy3.MorphAnalyzer()
-        logger.info("✅ [DB] Анализатор загружен.")
-    return _morph
 
 # 💡 ОПТИМИЗАЦИЯ: Выносим стоп-слова в константу, чтобы не создавать set каждый раз
 STOPWORDS = {
@@ -351,18 +336,6 @@ def _get_clean_words(query: str) -> list[str]:
     words = query.lower().replace(',', ' ').replace('.', ' ').split()
     return [w for w in words if w not in STOPWORDS]
 
-def _get_lemmas(query: str) -> list[str]:
-    """
-    Возвращает список лемм (начальных форм) слов из запроса.
-    """
-    words = _get_clean_words(query)
-    lemmas = set()
-    for word in words:
-        # 💡 ИСПОЛЬЗУЕМ ФУНКЦИЮ get_morph() ВМЕСТО ГЛОБАЛЬНОЙ ПЕРЕМЕННОЙ
-        normal_form = get_morph().parse(word)[0].normal_form
-        lemmas.add(normal_form)
-    return list(lemmas)
-
 def search_products_by_exact_match(query: str) -> list:
     """
     Ищет точное совпадение фразы в названии или тегах.
@@ -401,17 +374,7 @@ def _fetch_keyword_candidates(user_query: str) -> set:
     """Ищет ID товаров по ключевым словам (леммы и исходные формы)."""
     ids = set()
     
-    # 1. По леммам
-    lemmas = _get_lemmas(user_query)
-    if lemmas:
-        try:
-            res_lemma = supabase.rpc("keyword_search_products", {"search_terms": lemmas}).execute()
-            if res_lemma.data:
-                ids.update(p['id'] for p in res_lemma.data)
-        except Exception as e:
-            logger.warning(f"[DB] Ошибка поиска по леммам: {e}")
-
-    # 2. По исходным словам
+    # По исходным словам
     clean_words = _get_clean_words(user_query)
     if clean_words:
         try:
