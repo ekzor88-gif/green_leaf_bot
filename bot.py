@@ -282,7 +282,7 @@ async def on_text(message: Message):
             # 💡 ИЗМЕНЕНИЕ: search_products теперь возвращает (products, chunks)
             # 💡 КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: Функция db.search_products уже возвращает ОБЪЕДИНЕННЫЙ список товаров.
             # Убираем лишнюю логику слияния, которая здесь больше не нужна.
-            final_products, chunks_for_text_gen = await asyncio.to_thread(db.search_products, text)
+            final_products, chunks_for_text_gen = await db.search_products(text)
             products_for_text_gen = final_products
             newly_matched_products = final_products # Этот список используется для кнопок
 
@@ -305,7 +305,7 @@ async def on_text(message: Message):
                     reformulated_query = await asyncio.to_thread(db.reformulate_query_with_llm, text)
                     if reformulated_query:
                         logging.info(f"Запрос переформулирован в: '{reformulated_query}'. Запускаю повторный поиск.")
-                        final_products, chunks_for_text_gen = await asyncio.to_thread(db.search_products, reformulated_query)
+                        final_products, chunks_for_text_gen = await db.search_products(reformulated_query)
                         products_for_text_gen = final_products
                         newly_matched_products = final_products
 

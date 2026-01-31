@@ -17,4 +17,4 @@ COPY . .
 # 💡 ИЗМЕНЕНИЕ: Запускаем бота через Gunicorn для production.
 # Gunicorn будет слушать порт, указанный в переменной $PORT, которую предоставляет Cloud Run.
 # Мы используем специальный "воркер" для aiohttp и указываем Gunicorn, где найти наше веб-приложение (`bot:app`).
-CMD exec gunicorn --bind "0.0.0.0:$PORT" --worker-class aiohttp.worker.GunicornWebWorker "bot:app"
+CMD ["gunicorn", "--bind", ":8080", "--workers", "1", "--worker-class", "aiohttp.worker.GunicornWebWorker", "bot:app"]

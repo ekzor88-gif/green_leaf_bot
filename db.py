@@ -424,7 +424,7 @@ def _fetch_keyword_candidates(user_query: str) -> set:
     return ids
 
 # ⚙️ ГЛАВНАЯ ФУНКЦИЯ ПОИСКА (Refactored)
-def search_products(user_query: str):
+async def search_products(user_query: str):
     """
     Модульный гибридный поиск:
     1. Retrieve: Сбор кандидатов из разных источников (Exact, Vector, Keywords).
@@ -432,21 +432,23 @@ def search_products(user_query: str):
     """
     logger.info(f"🔎 Запуск поиска товаров по запросу: '{user_query}'")
     
+    loop = asyncio.get_running_loop()
+    
     # --- ЭТАП 1: СБОР КАНДИДАТОВ (RETRIEVAL) ---
     
     # 1. Точное совпадение (High Precision)
-    exact_products = search_products_by_exact_match(user_query)
+    exact_products = await loop.run_in_executor(None, search_products_by_exact_match, user_query)
     exact_ids = {p['id'] for p in exact_products}
     
     # 2. Векторный поиск по чанкам (High Recall)
-    chunks = search_product_chunks(user_query, top_k=10)
+    chunks = await loop.run_in_executor(None, search_product_chunks, user_query, 10)
     chunk_ids = {chunk['product_id'] for chunk in chunks}
     
     # 3. Ключевые слова (Backup)
     # Запускаем только если точный поиск дал мало результатов, чтобы не шуметь
     keyword_ids = set()
     if len(exact_ids) < 2:
-        keyword_ids = _fetch_keyword_candidates(user_query)
+        keyword_ids = await loop.run_in_executor(None, _fetch_keyword_candidates, user_query)
 
     # --- ЭТАП 2: ОБЪЕДИНЕНИЕ И РАНЖИРОВАНИЕ (RANKING) ---
     
@@ -465,7 +467,7 @@ def search_products(user_query: str):
     final_ids_list = list(all_ids)
     
     # Получаем полные данные товаров
-    products_data = get_products_by_ids(final_ids_list)
+    products_data = await loop.run_in_executor(None, get_products_by_ids, final_ids_list)
     
     # 💡 ПРОСТАЯ СОРТИРОВКА (Вместо ReRanker пока что):
     # Поднимаем наверх те, что нашлись точным поиском
