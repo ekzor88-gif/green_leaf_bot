@@ -346,6 +346,7 @@ def reformulate_query_with_llm(query: str) -> Optional[str]:
         return None
 
 def _get_clean_words(query: str) -> list[str]:
+    if not query: return []
     """Разбивает запрос на слова и убирает стоп-слова."""
     words = query.lower().replace(',', ' ').replace('.', ' ').split()
     return [w for w in words if w not in STOPWORDS]
@@ -376,7 +377,7 @@ def search_products_by_exact_match(query: str) -> list:
         
         clean_query = " ".join(words).strip()
 
-        if not clean_query:
+        if not clean_query or len(clean_query) < 3:
             return []
             
         # 💡 ИЗМЕНЕНИЕ: Ищем фразу везде, включая ОПИСАНИЕ (description).
@@ -394,64 +395,87 @@ def search_products_by_exact_match(query: str) -> list:
         logger.error(f"[DB] Ошибка при точном поиске: {e}")
         return []
 
-# ⚙️ Общая функция — Одинарный поиск (Быстро и Точно)
-def search_products(user_query: str):
-    """
-    Основная функция ГИБРИДНОГО поиска. Комбинирует семантический поиск по фрагментам
-    и поиск по ключевым словам в названии и тегах.
-    """
-    logger.info(f"🔎 Запуск поиска товаров по запросу: '{user_query}'")
-    
-    # --- Шаг 1: Точный поиск по фразе (Самый приоритетный) ---
-    # Решает проблему "жидкое иглоукалывание", находя фразу целиком в названии или тегах
-    exact_products_data = search_products_by_exact_match(user_query)
-    exact_ids = {p['id'] for p in exact_products_data}
-    if exact_ids:
-        logger.info(f"[DB] ✅ Точный поиск нашел ID: {exact_ids}")
+# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ПОИСКА (RETRIEVERS) ---
 
-    # --- Шаг 2: Семантический поиск по фрагментам ---
-    chunks = search_product_chunks(user_query)
-    chunk_ids = {chunk['product_id'] for chunk in chunks}
-    if chunk_ids:
-        logger.info(f"[DB] ✅ Векторный поиск нашел ID: {chunk_ids}")
+def _fetch_keyword_candidates(user_query: str) -> set:
+    """Ищет ID товаров по ключевым словам (леммы и исходные формы)."""
+    ids = set()
     
-    # --- Шаг 3: Поиск по ключевым словам (Раздельный) ---
-    keyword_ids = set()
-    
-    # 3.1 Поиск по леммам (жидкое -> жидкий)
+    # 1. По леммам
     lemmas = _get_lemmas(user_query)
     if lemmas:
         try:
             res_lemma = supabase.rpc("keyword_search_products", {"search_terms": lemmas}).execute()
             if res_lemma.data:
-                found_ids = {p['id'] for p in res_lemma.data}
-                keyword_ids.update(found_ids)
-                logger.info(f"[DB] ✅ Поиск по леммам {lemmas} нашел ID: {found_ids}")
+                ids.update(p['id'] for p in res_lemma.data)
         except Exception as e:
             logger.warning(f"[DB] Ошибка поиска по леммам: {e}")
 
-    # 3.2 Поиск по исходным словам (жидкое -> жидкое) - если они отличаются от лемм
+    # 2. По исходным словам
     clean_words = _get_clean_words(user_query)
     if clean_words:
         try:
             res_orig = supabase.rpc("keyword_search_products", {"search_terms": clean_words}).execute()
             if res_orig.data:
-                found_ids = {p['id'] for p in res_orig.data}
-                keyword_ids.update(found_ids)
-                logger.info(f"[DB] ✅ Поиск по словам {clean_words} нашел ID: {found_ids}")
+                ids.update(p['id'] for p in res_orig.data)
         except Exception as e:
             logger.warning(f"[DB] Ошибка поиска по словам: {e}")
+            
+    return ids
 
-    # --- Шаг 4: Объединение результатов ---
-    # Объединяем ID из всех трех источников
-    all_unique_ids = sorted(list(exact_ids | chunk_ids | keyword_ids))
+# ⚙️ ГЛАВНАЯ ФУНКЦИЯ ПОИСКА (Refactored)
+def search_products(user_query: str):
+    """
+    Модульный гибридный поиск:
+    1. Retrieve: Сбор кандидатов из разных источников (Exact, Vector, Keywords).
+    2. Rank: (В будущем) Переранжирование. Сейчас - объединение.
+    """
+    logger.info(f"🔎 Запуск поиска товаров по запросу: '{user_query}'")
     
-    logger.info(f"[DB] 🏁 Итого найдено уникальных товаров: {len(all_unique_ids)} (IDs: {all_unique_ids})")
+    # --- ЭТАП 1: СБОР КАНДИДАТОВ (RETRIEVAL) ---
+    
+    # 1. Точное совпадение (High Precision)
+    exact_products = search_products_by_exact_match(user_query)
+    exact_ids = {p['id'] for p in exact_products}
+    
+    # 2. Векторный поиск по чанкам (High Recall)
+    chunks = search_product_chunks(user_query, top_k=10)
+    chunk_ids = {chunk['product_id'] for chunk in chunks}
+    
+    # 3. Ключевые слова (Backup)
+    # Запускаем только если точный поиск дал мало результатов, чтобы не шуметь
+    keyword_ids = set()
+    if len(exact_ids) < 2:
+        keyword_ids = _fetch_keyword_candidates(user_query)
 
-    if not all_unique_ids:
+    # --- ЭТАП 2: ОБЪЕДИНЕНИЕ И РАНЖИРОВАНИЕ (RANKING) ---
+    
+    # Здесь можно подключить ReRanker (например, Cohere Rerank или FlashRank).
+    # Пока используем эвристику: Точные > Векторные > Ключевые.
+    
+    all_ids = set()
+    all_ids.update(exact_ids)
+    all_ids.update(chunk_ids)
+    all_ids.update(keyword_ids)
+    
+    if not all_ids:
         return [], [] # Ничего не найдено
 
-    # --- Шаг 5: Получение полной информации о товарах ---
-    final_products = get_products_by_ids(all_unique_ids)
+    # Превращаем set в список для запроса к БД
+    final_ids_list = list(all_ids)
+    
+    # Получаем полные данные товаров
+    products_data = get_products_by_ids(final_ids_list)
+    
+    # 💡 ПРОСТАЯ СОРТИРОВКА (Вместо ReRanker пока что):
+    # Поднимаем наверх те, что нашлись точным поиском
+    def sort_key(p):
+        if p['id'] in exact_ids: return 0 # Самый высокий приоритет
+        if p['id'] in chunk_ids: return 1
+        return 2
+        
+    sorted_products = sorted(products_data, key=sort_key)
+    
+    logger.info(f"[DB] 🏁 Найдено {len(sorted_products)} товаров. Топ-3 ID: {[p['id'] for p in sorted_products[:3]]}")
 
-    return final_products, chunks
+    return sorted_products, chunks

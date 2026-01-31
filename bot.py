@@ -7,6 +7,9 @@ from typing import Optional
 from aiogram import Bot, Dispatcher, Router, F, types
 from aiogram.types import Message, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.filters import Command, CommandObject # 💡 Добавили CommandObject для аргументов
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+from aiohttp import web
+import os
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.enums.chat_action import ChatAction # <-- ДОБАВИТЬ ЭТОТ ИМПОРТ В НАЧАЛО ФАЙЛА
@@ -608,10 +611,55 @@ async def on_product_detail(callback: types.CallbackQuery):
     # Обязательно подтверждаем callback, чтобы исчезли часы на кнопке
     await callback.answer()
 
-async def main():
-    print("🔄 [BOT] Запуск polling (ожидание сообщений)...")
-    await dp.start_polling(bot)
 
+# --- НОВАЯ ЛОГИКА ДЛЯ WEBHOOK И GOOGLE CLOUD RUN ---
 
-if __name__ == "__main__":
-    asyncio.run(main())
+# Этот секрет будет использоваться для проверки, что запросы приходят от Telegram.
+# Его нужно будет указать как переменную окружения в Google Cloud.
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "my-super-secret-dev-string")
+
+# Путь, на который Telegram будет отправлять обновления.
+WEBHOOK_PATH = f"/webhook/{config.TELEGRAM_TOKEN}"
+
+async def on_startup(bot: Bot):
+    """Действия при запуске бота в режиме вебхука."""
+    # URL вебхука устанавливается ОДИН РАЗ вручную или через скрипт после первого деплоя.
+    # Бот при старте не должен его переустанавливать, так как он не знает свой внешний URL.
+    # Мы можем запросить информацию о текущем вебхуке для проверки в логах.
+    webhook_info = await bot.get_webhook_info()
+    print(f"🚀 [BOT] Запуск в режиме Webhook. Текущий URL вебхука: {webhook_info.url}")
+
+async def on_shutdown(bot: Bot):
+    """Действия при остановке бота."""
+    print("🛑 [BOT] Остановка...")
+    # При остановке контейнера в Cloud Run удалять вебхук не нужно,
+    # так как сервис может быть просто перезапущен или заменен новой версией.
+
+# --- Создание веб-приложения для Gunicorn ---
+
+# Регистрируем startup и shutdown хендлеры в диспетчере.
+dp.startup.register(on_startup)
+dp.shutdown.register(on_shutdown)
+
+# Создаем главный объект веб-приложения `aiohttp`.
+app = web.Application()
+
+# Создаем обработчик вебхуков для aiogram.
+webhook_requests_handler = SimpleRequestHandler(
+    dispatcher=dp,
+    bot=bot,
+    secret_token=WEBHOOK_SECRET,
+)
+# Регистрируем обработчик по нашему пути.
+# Все запросы на https://<your-cloud-run-url>/webhook/<your-token> будут попадать сюда.
+webhook_requests_handler.register(app, path=WEBHOOK_PATH)
+
+# Связываем веб-приложение с диспетчером aiogram, чтобы входящие запросы правильно обрабатывались.
+setup_application(app, dp, bot=bot)
+
+if __name__ == '__main__':
+    # Этот блок выполняется только при локальном запуске (python bot.py)
+    # Он не будет использоваться в Docker-контейнере с Gunicorn.
+    print("⚠️ Запуск в режиме локальной разработки (без Gunicorn).")
+    port = int(os.getenv("PORT", 8080))
+    web.run_app(app, host="0.0.0.0", port=port)
