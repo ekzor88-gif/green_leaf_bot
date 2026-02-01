@@ -18,14 +18,11 @@ jobs:
           username: ${{ secrets.USERNAME }}
           key: ${{ secrets.SSH_KEY }}
           script: |
+            cd ~
+            # Если папка есть - удаляем (радикально, но надежно для первого раза)
+            rm -rf ~/ai_bot
+            # Клонируем проект заново
+            git clone https://github.com/${{ github.repository }} ~/ai_bot
             cd ~/ai_bot
-            # Инициализируем гит, если его нет
-            if [ ! -d ".git" ]; then
-              git init
-              git remote add origin https://github.com/${{ github.repository }}
-            fi
-            # Принудительно забираем код, игнорируя то, что папка не пуста
-            git fetch --all
-            git reset --hard origin/main
-            # Запускаем магию Docker
+            # Запускаем без сборки образа (просто проверить, что файлы долетели)
             docker compose up --build -d
