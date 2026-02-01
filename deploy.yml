@@ -19,12 +19,13 @@ jobs:
           key: ${{ secrets.SSH_KEY }}
           script: |
             cd ~/ai_bot
-            # Если папка пустая от гита — клонируем код прямо сюда
+            # Инициализируем гит, если его нет
             if [ ! -d ".git" ]; then
-              git clone https://github.com/${{ github.repository }} .
-            else
-              # Если гит уже есть — просто забираем обновления
-              git pull origin main
+              git init
+              git remote add origin https://github.com/${{ github.repository }}
             fi
-            # Запускаем сборку (теперь Dockerfile точно будет на месте)
+            # Принудительно забираем код, игнорируя то, что папка не пуста
+            git fetch --all
+            git reset --hard origin/main
+            # Запускаем магию Docker
             docker compose up --build -d
