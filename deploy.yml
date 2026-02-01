@@ -1,0 +1,29 @@
+name: Deploy Bot to Hetzner
+
+on:
+  push:
+    branches: [ main ]  # Проверь, как называется твоя ветка: main или master
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.USERNAME }}
+          key: ${{ secrets.SSH_KEY }}
+          script: |
+            cd ~/ai_bot
+            # Если папка пустая или там нет git, клонируем. Иначе - тянем обновления.
+            if [ ! -d ".git" ]; then
+              git clone https://github.com/${{ github.repository }} .
+            else
+              git pull origin main
+            fi
+            # Запускаем сборку
+            docker compose up --build -d
