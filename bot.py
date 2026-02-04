@@ -447,20 +447,22 @@ async def show_page(callback: types.CallbackQuery):
     
     footer_buttons = []
     
+    # 1. Кнопка "Назад" (появляется, если мы не на первой странице)
+    if current_offset > 0:
+        prev_offset = max(0, current_offset - PAGE_SIZE)
+        footer_buttons.append(
+            InlineKeyboardButton(text="⬅️ Назад", callback_data=f"show_page_{prev_offset}")
+        )
+
     next_offset = current_offset + PAGE_SIZE
     has_next = next_offset < total
     
-    # Если есть еще товары, добавляем кнопку "Показать ещё"
+    # 2. Кнопка "Далее" (появляется, если есть еще товары)
     if has_next:
         footer_buttons.append(
             # 💡 ПЕРЕДАЕМ НОВЫЙ СТАРТОВЫЙ ИНДЕКС
-            InlineKeyboardButton(text=f"Показать ещё ({total - next_offset})", callback_data=f"show_page_{next_offset}")
+            InlineKeyboardButton(text=f"Далее ({total - next_offset}) ➡️", callback_data=f"show_page_{next_offset}")
         )
-    
-    # Добавляем кнопку "Хватит" (или "Назад", если нужна)
-    footer_buttons.append(
-        InlineKeyboardButton(text="Хватит, вернуться", callback_data="stop")
-    )
     
     # Формируем итоговую клавиатуру
     kb = InlineKeyboardMarkup(
