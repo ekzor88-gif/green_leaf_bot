@@ -403,7 +403,7 @@ async def on_text(message: Message):
                     ]
                 ])
                 await message.answer(
-                    f"Я нашёл {total} товаров. Показать вам первые 5?",
+                    f"Я нашёл {total} товаров, которые могут Вас заинтересовать. Показать вам первые 5?",
                     reply_markup=kb
                 )
 
