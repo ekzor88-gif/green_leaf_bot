@@ -21,6 +21,10 @@ DEFAULT_MANAGER_PHONE = "77012706305"
 
 GOOGLE_SHEET_URL = "https://drive.google.com/file/d/11Q-jcD1z6jnHwaxAqN69YpFiCeeKKC5M/view?usp=sharing"
 
+# 💡 Ссылка на видео-инструкцию (Google Drive, YouTube или др.)
+# Если оставить пустой (""), ссылка в приветствии отображаться не будет.
+VIDEO_INSTRUCTION_URL = "" 
+
 missing = []
 if not TELEGRAM_TOKEN: missing.append("TELEGRAM_TOKEN (или BOT_TOKEN)")
 if not SUPABASE_URL:  missing.append("SUPABASE_URL")
