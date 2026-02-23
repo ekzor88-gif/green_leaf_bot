@@ -23,7 +23,7 @@ GOOGLE_SHEET_URL = "https://drive.google.com/file/d/11Q-jcD1z6jnHwaxAqN69YpFiCee
 
 # 💡 Ссылка на видео-инструкцию (Google Drive, YouTube или др.)
 # Если оставить пустой (""), ссылка в приветствии отображаться не будет.
-VIDEO_INSTRUCTION_URL = "" 
+VIDEO_INSTRUCTION_URL = "https://drive.google.com/file/d/1ptS9_SCRPk8E9KSojGyZ4LRGu9gdmRDm/view?usp=sharing" 
 
 missing = []
 if not TELEGRAM_TOKEN: missing.append("TELEGRAM_TOKEN (или BOT_TOKEN)")

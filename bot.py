@@ -53,6 +53,11 @@ try:
 except FileNotFoundError:
     USER_GUIDE_TEXT = "К сожалению, инструкция не найдена."
 
+# 💡 Добавляем ссылку на видео в инструкцию, если она есть
+if hasattr(config, 'VIDEO_INSTRUCTION_URL') and config.VIDEO_INSTRUCTION_URL:
+    USER_GUIDE_TEXT += f'\n\n🎥 <a href="{config.VIDEO_INSTRUCTION_URL}">Видео-Инструкция</a>'
+
+
 # ----------------- КЛАВИАТУРЫ -----------------
 
 def get_main_reply_keyboard():
@@ -140,10 +145,10 @@ async def on_start(message: Message, command: CommandObject):
         "А еще подумайте, какую покупку вы бы хотели сделать в ближайшее время, возможно тут вы найдете что-то интересное."
     )
 
-    # # 💡 Добавляем ссылку на видео-инструкцию, если она задана в конфиге
-    # if hasattr(config, 'VIDEO_INSTRUCTION_URL') and config.VIDEO_INSTRUCTION_URL:
-    #     welcome_text += f"\n\n🎥 <a href='{config.VIDEO_INSTRUCTION_URL}'>Видео-инструкция: как пользоваться ботом</a>"
-    #
+    # 💡 Добавляем ссылку на видео-инструкцию, если она задана в конфиге
+    if hasattr(config, 'VIDEO_INSTRUCTION_URL') and config.VIDEO_INSTRUCTION_URL:
+        welcome_text += f"\n\n🎥 <a href='{config.VIDEO_INSTRUCTION_URL}'>Видео-Инструкция</a>"
+
     # Отправляем приветствие и постоянно видимое Reply-меню
     await message.answer(
         welcome_text,
