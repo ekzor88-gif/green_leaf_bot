@@ -157,12 +157,23 @@ def get_manager_phone_for_user(user_id: int) -> str:
             partner = res.data["partners"]
             end_date_str = partner.get("subscription_end_date")
             
-            if end_date_str:
-                # Парсим дату (Supabase возвращает ISO формат)
+            # 1. Если даты нет — считаем подписку бессрочной
+            if not end_date_str:
+                return partner.get("phone_number")
+
+            # 2. Если дата есть — парсим её аккуратно
+            try:
                 end_date = datetime.fromisoformat(end_date_str.replace('Z', '+00:00'))
-                # Проверяем, не истекла ли подписка
-                if end_date > datetime.now(timezone.utc):
-                    return partner.get("phone_number")
+            except ValueError:
+                # Если формат простой (YYYY-MM-DD), fromisoformat может упасть на replace
+                end_date = datetime.fromisoformat(end_date_str)
+            
+            # Если дата "наивная" (без таймзоны), принудительно ставим UTC, чтобы не было ошибки сравнения
+            if end_date.tzinfo is None:
+                end_date = end_date.replace(tzinfo=timezone.utc)
+
+            if end_date > datetime.now(timezone.utc):
+                return partner.get("phone_number")
     
     except Exception as e:
         logger.error(f"Ошибка при получении номера менеджера для {user_id}: {e}")
