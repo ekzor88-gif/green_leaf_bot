@@ -145,38 +145,59 @@ def get_manager_phone_for_user(user_id: int) -> str:
     Логика:
     1. Если у юзера есть партнер И подписка партнера активна -> номер партнера.
     2. Иначе -> дефолтный номер из конфига.
+    
+    💡 ИСПРАВЛЕНО 2026-02-25: Заменён ненадёжный PostgREST JOIN на два отдельных запроса.
+    Старый вариант с select("partner_id, partners(...)") ломался при сбросе PostgREST schema cache.
     """
     default_phone = config.DEFAULT_MANAGER_PHONE
     
     try:
-        # Запрашиваем данные пользователя вместе с данными партнера
-        # Синтаксис select: "partner_id, partners(...)" позволяет сделать JOIN
-        res = supabase.table("users").select("partner_id, partners(phone_number, subscription_end_date)").eq("user_id", user_id).single().execute()
+        # --- Шаг 1: Получаем partner_id пользователя ---
+        user_res = supabase.table("users").select("partner_id").eq("user_id", user_id).single().execute()
         
-        if res.data and res.data.get("partners"):
-            partner = res.data["partners"]
-            end_date_str = partner.get("subscription_end_date")
-            
-            # 1. Если даты нет — считаем подписку бессрочной
-            if not end_date_str:
-                return partner.get("phone_number")
+        if not user_res.data or not user_res.data.get("partner_id"):
+            logger.debug(f"[PHONE] У пользователя {user_id} нет привязанного партнера. Отдаём дефолтный номер.")
+            return default_phone
+        
+        partner_id = user_res.data["partner_id"]
+        logger.debug(f"[PHONE] Пользователь {user_id} привязан к партнеру ID={partner_id}.")
+        
+        # --- Шаг 2: Получаем данные партнера отдельным запросом ---
+        partner_res = supabase.table("partners").select("phone_number, subscription_end_date").eq("id", partner_id).single().execute()
+        
+        if not partner_res.data:
+            logger.warning(f"[PHONE] Партнер ID={partner_id} не найден в таблице partners! Отдаём дефолтный номер.")
+            return default_phone
+        
+        partner = partner_res.data
+        phone = partner.get("phone_number")
+        end_date_str = partner.get("subscription_end_date")
+        
+        logger.debug(f"[PHONE] Партнер ID={partner_id}: phone={phone}, subscription_end={end_date_str}")
+        
+        # 1. Если даты нет — считаем подписку бессрочной
+        if not end_date_str:
+            logger.info(f"[PHONE] Партнер ID={partner_id}: подписка бессрочная. Отдаём номер партнера: {phone}")
+            return phone or default_phone
 
-            # 2. Если дата есть — парсим её аккуратно
-            try:
-                end_date = datetime.fromisoformat(end_date_str.replace('Z', '+00:00'))
-            except ValueError:
-                # Если формат простой (YYYY-MM-DD), fromisoformat может упасть на replace
-                end_date = datetime.fromisoformat(end_date_str)
-            
-            # Если дата "наивная" (без таймзоны), принудительно ставим UTC, чтобы не было ошибки сравнения
-            if end_date.tzinfo is None:
-                end_date = end_date.replace(tzinfo=timezone.utc)
+        # 2. Если дата есть — парсим её аккуратно
+        try:
+            end_date = datetime.fromisoformat(end_date_str.replace('Z', '+00:00'))
+        except ValueError:
+            end_date = datetime.fromisoformat(end_date_str)
+        
+        # Если дата "наивная" (без таймзоны), принудительно ставим UTC
+        if end_date.tzinfo is None:
+            end_date = end_date.replace(tzinfo=timezone.utc)
 
-            if end_date > datetime.now(timezone.utc):
-                return partner.get("phone_number")
+        if end_date > datetime.now(timezone.utc):
+            logger.info(f"[PHONE] Партнер ID={partner_id}: подписка активна до {end_date_str}. Отдаём номер партнера: {phone}")
+            return phone or default_phone
+        else:
+            logger.info(f"[PHONE] Партнер ID={partner_id}: подписка ИСТЕКЛА {end_date_str}. Отдаём дефолтный номер.")
     
     except Exception as e:
-        logger.error(f"Ошибка при получении номера менеджера для {user_id}: {e}")
+        logger.error(f"[PHONE] Ошибка при получении номера менеджера для {user_id}: {e}", exc_info=True)
     
     return default_phone
 
