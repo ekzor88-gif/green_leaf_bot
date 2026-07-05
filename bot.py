@@ -4,8 +4,8 @@ import ast
 import re
 import time
 from typing import Optional
-from aiogram import Bot, Dispatcher, Router, F, types
-from aiogram.types import Message, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
+from aiogram import Bot, Dispatcher, Router, F, types, BaseMiddleware
+from aiogram.types import Message, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, CallbackQuery, TelegramObject
 from aiogram.filters import Command, CommandObject # 💡 Добавили CommandObject для аргументов
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -41,6 +41,55 @@ bot = Bot(
 dp = Dispatcher()
 router = Router()
 dp.include_router(router)
+
+# 🔒 MIDDLEWARE ПРОВЕРКИ ДОСТУПА (ACCESS WALL)
+class AccessMiddleware(BaseMiddleware):
+    async def __call__(self, handler, event: TelegramObject, data: dict):
+        user_id = None
+        if isinstance(event, Message):
+            user_id = event.from_user.id
+            # Всегда пропускаем команду /start, чтобы была возможность перепривязки
+            if event.text and event.text.startswith("/start"):
+                return await handler(event, data)
+        elif isinstance(event, CallbackQuery):
+            user_id = event.from_user.id
+
+        if user_id:
+            # Проверяем доступ через базу данных
+            has_access, role, phone = await asyncio.to_thread(db.check_user_access, user_id)
+            if not has_access:
+                if role == "partner":
+                    msg_text = (
+                        "🚫 <b>Доступ к боту временно приостановлен</b>\n\n"
+                        "Срок действия вашей подписки на бота-консультанта Greenleaf истек.\n"
+                        "Чтобы продолжить пользоваться помощником и восстановить доступ для всех ваших клиентов, пожалуйста, свяжитесь с администраторами для продления подписки:\n\n"
+                        "📞 <b>Контакты для продления:</b>\n"
+                        "• <b>Василий Артемьев:</b> +77029554206 (@Artemyev_Vasiliy)\n"
+                        "• <b>Надежда Артемьева:</b> +77012706305 (@Nadinpozitiv)\n\n"
+                        "Пожалуйста, напишите нам в Telegram или позвоните, чтобы быстро решить этот вопрос. 💚"
+                    )
+                else:
+                    phone_formatted = phone if phone else config.DEFAULT_MANAGER_PHONE
+                    msg_text = (
+                        "🌿 <b>Доступ к консультанту временно ограничен</b>\n\n"
+                        "К сожалению, подписка на бота у вашего спонсора (консультанта) закончилась.\n"
+                        "Пожалуйста, свяжитесь с ним напрямую, чтобы он продлил доступ к нашему помощнику:\n\n"
+                        f"📞 <b>Контакты вашего консультанта:</b> +{phone_formatted}\n\n"
+                        "Как только ваш консультант продлит подписку, бот мгновенно продолжит отвечать на ваши вопросы! 😊"
+                    )
+                
+                if isinstance(event, Message):
+                    await event.answer(msg_text, parse_mode="HTML")
+                elif isinstance(event, CallbackQuery):
+                    await event.message.answer(msg_text, parse_mode="HTML")
+                    await event.answer()
+                return # Прерываем цепочку, не вызываем обработчик
+
+        return await handler(event, data)
+
+# Регистрируем Middleware как outer (внешний), чтобы он срабатывал до фильтров
+router.message.outer_middleware(AccessMiddleware())
+router.callback_query.outer_middleware(AccessMiddleware())
 
 # 🛡️ НАСТРОЙКИ БЕЗОПАСНОСТИ
 MAX_MESSAGE_LENGTH = 2000  # Максимальная длина сообщения (символов)

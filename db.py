@@ -9,14 +9,14 @@ from datetime import datetime, timezone # 💡 Для проверки даты 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
-print("⏳ [DB] Подключение к Supabase...")
+print("[DB] Connecting to Supabase...")
 # 💡 Инициализация синхронных клиентов с увеличенным таймаутом
 # Это нужно, чтобы "холодный старт" базы на бесплатном тарифе не вызывал ошибку.
 options = ClientOptions(postgrest_client_timeout=30)
 supabase = create_client(config.SUPABASE_URL, config.SUPABASE_KEY, options=options)
-print("✅ [DB] Supabase клиент создан.")
+print("[DB] Supabase client created successfully.")
 
-print("⏳ [DB] Подключение к OpenAI...")
+print("[DB] Connecting to OpenAI...")
 openai_client = OpenAI(api_key=config.OPENAI_API_KEY)
 
 # 💡 ОПТИМИЗАЦИЯ: Выносим стоп-слова в константу, чтобы не создавать set каждый раз
@@ -33,16 +33,28 @@ STOPWORDS = {
 
 def upsert_user(user_id: int, first_name: str, last_name: str, username: str):
     """
-    Обновляет или создает пользователя. 
-    💡 Коррекция: Здесь используется 'user_id', что корректно.
+    Обновляет или создает пользователя.
+    Если у пользователя нет привязанного партнера, автоматически привязывает его к Надежде.
     """
     try:
-        return supabase.table("users").upsert({
+        # 1. Upsert основных полей пользователя
+        supabase.table("users").upsert({
             "user_id": user_id,
             "first_name": first_name,
             "last_name": last_name,
             "username": username,
         }).execute()
+        
+        # 2. Проверяем наличие partner_id
+        check_res = supabase.table("users").select("partner_id").eq("user_id", user_id).execute()
+        if check_res.data and len(check_res.data) > 0:
+            if check_res.data[0].get("partner_id") is None:
+                # Ищем ID дефолтного партнера (Надежды)
+                p_res = supabase.table("partners").select("id").eq("referral_code", config.DEFAULT_PARTNER_CODE).execute()
+                if p_res.data and len(p_res.data) > 0:
+                    default_partner_id = p_res.data[0]["id"]
+                    supabase.table("users").update({"partner_id": default_partner_id}).eq("user_id", user_id).execute()
+                    logger.info(f"[DB] Органический пользователь {user_id} автопривязан к Надежде (ID: {default_partner_id})")
     except Exception as e:
         logger.error(f"Ошибка upsert_user: {e}")
         return None
@@ -476,3 +488,81 @@ async def search_products(user_query: str):
     logger.info(f"[DB] 🏁 Найдено {len(sorted_products)} товаров. Топ-3 ID: {[p['id'] for p in sorted_products[:3]]}")
 
     return sorted_products, chunks
+
+
+def check_user_access(user_id: int) -> tuple[bool, str, Optional[str]]:
+    """
+    Проверяет доступ пользователя к боту.
+    Возвращает: (has_access, role, partner_phone)
+    """
+    try:
+        # 1. Проверяем, является ли пользователь администратором
+        if user_id in config.ADMIN_IDS:
+            return True, "admin", None
+
+        # 2. Проверяем, является ли пользователь партнером
+        p_res = supabase.table("partners").select("id, subscription_end_date").eq("telegram_user_id", user_id).execute()
+        if p_res.data and len(p_res.data) > 0:
+            partner = p_res.data[0]
+            end_date_str = partner.get("subscription_end_date")
+            
+            # Нет даты = бессрочная подписка
+            if not end_date_str:
+                return True, "partner", None
+                
+            # Парсим дату
+            try:
+                end_date = datetime.fromisoformat(end_date_str.replace('Z', '+00:00'))
+            except ValueError:
+                end_date = datetime.fromisoformat(end_date_str)
+                
+            if end_date.tzinfo is None:
+                end_date = end_date.replace(tzinfo=timezone.utc)
+                
+            if end_date > datetime.now(timezone.utc):
+                return True, "partner", None
+            else:
+                return False, "partner", None
+
+        # 3. Если не партнер — это обычный клиент
+        # Ищем его привязанного партнера
+        u_res = supabase.table("users").select("partner_id").eq("user_id", user_id).execute()
+        if not u_res.data or len(u_res.data) == 0 or u_res.data[0].get("partner_id") is None:
+            # Нет партнера (привязываем к Надежде в фоне)
+            p_def = supabase.table("partners").select("id, phone_number").eq("referral_code", config.DEFAULT_PARTNER_CODE).execute()
+            if p_def.data and len(p_def.data) > 0:
+                def_id = p_def.data[0]["id"]
+                supabase.table("users").update({"partner_id": def_id}).eq("user_id", user_id).execute()
+                return True, "client", p_def.data[0].get("phone_number")
+            return True, "client", None
+
+        partner_id = u_res.data[0]["partner_id"]
+        
+        # Получаем данные этого партнера
+        p_data_res = supabase.table("partners").select("phone_number, subscription_end_date").eq("id", partner_id).execute()
+        if not p_data_res.data or len(p_data_res.data) == 0:
+            return True, "client", None
+            
+        partner = p_data_res.data[0]
+        phone = partner.get("phone_number")
+        end_date_str = partner.get("subscription_end_date")
+        
+        if not end_date_str:
+            return True, "client", phone
+            
+        try:
+            end_date = datetime.fromisoformat(end_date_str.replace('Z', '+00:00'))
+        except ValueError:
+            end_date = datetime.fromisoformat(end_date_str)
+            
+        if end_date.tzinfo is None:
+            end_date = end_date.replace(tzinfo=timezone.utc)
+            
+        if end_date > datetime.now(timezone.utc):
+            return True, "client", phone
+        else:
+            return False, "client", phone
+
+    except Exception as e:
+        logger.error(f"[DB] Ошибка при проверке доступа для {user_id}: {e}", exc_info=True)
+        return True, "client", None
