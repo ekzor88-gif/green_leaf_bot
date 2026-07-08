@@ -20,7 +20,7 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 DEFAULT_MANAGER_PHONE = "77012706305" 
 
 # ID администраторов с иммунитетом к блокировкам (через запятую)
-ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "1025315242,575300542").split(",") if x.strip()]
+ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
 
 # Реферальный код Надежды по умолчанию для органических пользователей
 DEFAULT_PARTNER_CODE = "NadinGreenleaf"
