@@ -25,7 +25,7 @@ ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
 # Реферальный код Надежды по умолчанию для органических пользователей
 DEFAULT_PARTNER_CODE = "NadinGreenleaf"
 
-GOOGLE_SHEET_URL = "https://drive.google.com/file/d/11Q-jcD1z6jnHwaxAqN69YpFiCeeKKC5M/view?usp=sharing"
+GOOGLE_SHEET_URL = "https://drive.google.com/file/d/1S7tQ9wfyWem5eCiQdK9RXR6AfB-5yJAH/view?usp=sharing"
 
 # 💡 Ссылка на видео-инструкцию (Google Drive, YouTube или др.)
 # Если оставить пустой (""), ссылка в приветствии отображаться не будет.
