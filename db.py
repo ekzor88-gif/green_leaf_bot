@@ -448,7 +448,11 @@ async def search_products(user_query: str):
     exact_ids = {p['id'] for p in exact_products}
     
     # 2. Векторный поиск по чанкам (High Recall)
-    chunks = await loop.run_in_executor(None, search_product_chunks, user_query, 10)
+    raw_chunks = await loop.run_in_executor(None, search_product_chunks, user_query, 10)
+    
+    # 💡 ФИЛЬТРАЦИЯ: Отсекаем мусор с низким сходством (порог 0.65)
+    chunks = [c for c in raw_chunks if c.get('similarity', 0) > 0.65]
+    
     chunk_ids = {chunk['product_id'] for chunk in chunks}
     
     # 3. Ключевые слова (Backup)

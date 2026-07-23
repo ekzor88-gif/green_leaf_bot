@@ -35,3 +35,9 @@ delete_product.py
 DEPLOY_GUIDE.md
 re_embed_product.py
 update_catalog.py
+
+# 5. Тестовые скрипты и временные файлы
+test_semantic_search.py
+output*.txt
+scratch/
+*.csv
