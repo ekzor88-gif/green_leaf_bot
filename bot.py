@@ -318,7 +318,22 @@ async def on_text(message: Message):
         # --- ШАГ 1: КЛАССИФИКАЦИЯ И RAG (ПРЯМОЙ ПОИСК) ---
         # --------------------------------------------------------
         
-        do_rag_search = await asyncio.to_thread(is_product_query, text)
+        # 💡 СНАЧАЛА ПРОВЕРЯЕМ УТОЧНЕНИЕ: Если это запрос состава, инструкции и т.д., 
+        # и у нас ЕСТЬ сохраненные товары, мы НЕ делаем новый поиск.
+        CLARIFICATION_WORDS = [
+            "первый", "второй", "третий", "номер", "подробнее", "о нем", "о ней",
+            "состав", "ингредиент", "ингредиенты", "из чего", "содержит",
+            "как применять", "как принимать", "применение", "дозировка", "дозировку",
+            "инструкция", "способ применения",
+        ]
+        is_clarification = any(word in text.lower() for word in CLARIFICATION_WORDS)
+        previous_products = await asyncio.to_thread(db.get_last_products, u.id)
+        
+        if is_clarification and previous_products:
+            do_rag_search = False
+            logging.info(f"💬 Уточняющий вопрос '{text}'. Пропускаем новый RAG-поиск.")
+        else:
+            do_rag_search = await asyncio.to_thread(is_product_query, text)
 
         # 💡 СТРАХОВКА: Если LLM считает, что это не товар, но в базе есть точное совпадение — ищем.
         # Это решает проблему, когда LLM думает, что "жидкое иглоукалывание" — это процедура, а не товар.
@@ -388,12 +403,13 @@ async def on_text(message: Message):
             # 💡 КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: Если это не поисковый запрос, мы очищаем контекст,
             # чтобы бот не предлагал старые товары в ответ на "спасибо" или "нет".
             # Мы оставим контекст только если это уточняющий вопрос по списку.
-            is_clarification = any(word in text.lower() for word in ["первый", "второй", "третий", "номер", "подробнее", "о нем"])
-            if is_clarification:
-                products_for_text_gen = await asyncio.to_thread(db.get_last_products, u.id)
+            if is_clarification and previous_products:
+                products_for_text_gen = previous_products
+                logging.info(f"💬 Уточняющий вопрос. Использую сохранённый контекст: {len(products_for_text_gen)} товаров.")
             else:
                 await asyncio.to_thread(db.clear_last_products, u.id)
                 products_for_text_gen = []
+
 
         # 💡 ФИНАЛЬНАЯ ПРОВЕРКА: Если после всех поисков и фолбэков мы так и не нашли
         # ни одного товара, мы все равно сгенерируем ответ, но уже без контекста каталога.
@@ -419,11 +435,44 @@ async def on_text(message: Message):
         
         if answer:
             # 💡 ГАРАНТИРОВАННОЕ ИСПРАВЛЕНИЕ: Принудительно заменяем Markdown на HTML-теги.
-            # Это надежнее, чем полагаться на LLM.
             # Ищем все вхождения **текст** и заменяем на <b>текст</b>.
             answer = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', answer)
             await asyncio.to_thread(db.save_message, u.id, "assistant", answer)
-            await message.answer(answer, parse_mode=ParseMode.HTML)
+            
+            # 🛡️ ЗАЩИТА ОТ ДЛИННЫХ СООБЩЕНИЙ (> 4096 символов)
+            MAX_LEN = 4000
+            if len(answer) <= MAX_LEN:
+                try:
+                    await message.answer(answer, parse_mode=ParseMode.HTML)
+                except Exception as e:
+                    logging.error(f"Ошибка отправки (возможно кривой HTML): {e}")
+                    await message.answer(answer) # Фолбэк без HTML
+            else:
+                logging.info(f"Сообщение слишком длинное ({len(answer)} симв.). Разбиваем на части.")
+                parts = []
+                temp_answer = answer
+                while len(temp_answer) > 0:
+                    if len(temp_answer) <= MAX_LEN:
+                        parts.append(temp_answer)
+                        break
+                    
+                    # Ищем перенос строки ближе к концу лимита, чтобы не порвать HTML-теги внутри абзаца
+                    split_idx = temp_answer.rfind('\n', 0, MAX_LEN)
+                    if split_idx == -1:
+                        split_idx = temp_answer.rfind(' ', 0, MAX_LEN)
+                        if split_idx == -1:
+                            split_idx = MAX_LEN
+                            
+                    parts.append(temp_answer[:split_idx])
+                    temp_answer = temp_answer[split_idx:].lstrip()
+                    
+                for i, part in enumerate(parts):
+                    try:
+                        await message.answer(part, parse_mode=ParseMode.HTML)
+                    except Exception as e:
+                        logging.error(f"Ошибка отправки части {i+1}: {e}")
+                        await message.answer(part) # Фолбэк без HTML
+                    await asyncio.sleep(0.1) # Небольшая пауза между кусками
 
         # Вывод кнопок для товаров (только если был RAG-поиск и товары найдены)
         # Кнопки должны выводиться только после НОВОГО поиска.

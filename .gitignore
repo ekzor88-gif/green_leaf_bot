@@ -40,4 +40,10 @@ update_catalog.py
 test_semantic_search.py
 output*.txt
 scratch/
+scratch/test_composition.py
+scratch/test_dialog_flow.py
+scratch/show_latest.py
+scratch/gather_stats.py
+scratch/export_products.py
+scratch/search_term.py
 *.csv
